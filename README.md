@@ -38,7 +38,7 @@ Data loops via UDP: `VaM VRhand` ➔ `127.0.0.1 UDP 9999` ➔ `Newton` ➔ `127.
 2. **Miniconda / Anaconda**: Recommended lightweight package manager from [anaconda.com](https://anaconda.com).
 
 ### Installation & Execution
-Run the following in your **Anaconda Prompt** or terminal:
+Run the following in your **Anaconda Prompt** :
 
 1. **Clone the repository:**
    ```bash
