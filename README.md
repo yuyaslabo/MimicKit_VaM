@@ -35,8 +35,7 @@ Data loops via UDP: `VaM VRhand` ➔ `127.0.0.1 UDP 9999` ➔ `Newton` ➔ `127.
 
 ### Prerequisites
 1. **Git**: Install from [git-scm.com](https://git-scm.com).
-2. **Miniconda / Anaconda**: Recommended lightweight package manager from [://anaconda.com](https://://anaconda.com).
-3. **Newton Simulator Backend**: Install version v1.0.0 according to your platform.
+2. **Miniconda / Anaconda**: Recommended lightweight package manager from [anaconda.com](https://anaconda.com).
 
 ### Installation & Execution
 Run the following in your **Anaconda Prompt** or terminal:
@@ -46,22 +45,30 @@ Run the following in your **Anaconda Prompt** or terminal:
    git clone https://github.com/yuyaslabo/MimicKit_VaM
    cd MimicKit_VaM
    ```
+
 2. **Create and activate the Python environment:**
    ```bash
-   conda create --name mimickit python=3.1
+   conda create --name mimickit python=3.11 -y
    conda activate mimickit
    ```
-3. **Install dependencies:**
+
+3. **Install Newton Simulator Backend (v1.0.0):**
+   ```bash
+   pip install newton==1.0.0
+   ```
+
+4. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
-4. **Run AI Inference:**
+
+5. **Run AI Inference:**
    ```bash
    python mimickit/run.py --mode test --num_envs 1 --engine_config data/engines/newton_engine.yaml --env_config data/envs/amp_g1_vam_env.yaml --agent_config data/agents/amp_g1_vam_agent.yaml --visualize true --model_file checkpoint/model.pt
    ```
-5. **Virt-A-Mate Setup:** Load `MimickitReceiver.cs` as a **Person plugin** and `VRhand_Mimickit2.cs` as a **Scene plugin** in Virt-A-Mate.
 
----
+6. **Virt-A-Mate Setup:** Load `MimickitReceiver.cs` as a **Person plugin** and `VRhand_Mimickit2.cs` as a **Scene plugin** in Virt-A-Mate.
+
 
 ## License & Attributions
 
