@@ -70,6 +70,24 @@ Run the following in your **Anaconda Prompt** :
 6. **Virt-A-Mate Setup:** Load `MimickitReceiver.cs` as a **Person plugin** and `VRhand_Mimickit2.cs` as a **Scene plugin** in Virt-A-Mate.
 
 
+## Repository Structure & Modified Files
+
+本フォークリポジトリにおける、独自システムの追加・改変ファイル構成です。
+
+```text
+MimicKit/
+├── mimickit/
+│   └── envs/
+│       ├── env_builder.py          # [改変] 独自環境「amp_env_vam.py」の追加登録
+│       ├── amp_env_vam.py          # [追加] AMP環境、観測、初期化・タスク/リセット処理
+│       ├── vam_vr_tracking.py      # [追加] UDP 9999によるVR手/HMD受信、座標変換・配置
+│       ├── vam_vr_body.py          # [追加] プレーヤー胴体/腕IKとカプセルの動的配置
+│       ├── vam_vr_physics.py       # [追加] PDコントローラによる外力制御、トリガーでのドラッグ処理
+│       ├── vam_vr_assets.py        # [追加] 手/HMD/胴体のXMLアセットの自動生成
+│       ├── vam_udp_sender.py       # [追加] UDP 9998によるVaMへのリアルタイムモーション送信
+│       └── task_location_env_vam.py # [追加] 既存ファイルをVaM環境向けにパッケージ内配置
+
+
 ## License & Attributions
 
 * **Repository Code & Plugins:** Distributed under the **MIT License**.
