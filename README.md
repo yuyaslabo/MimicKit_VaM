@@ -22,7 +22,7 @@ This project runs AI inference via **Newton** in the background while Virt-A-Mat
 
 ## Network & Components
 
-Data loops via UDP: `VaM VRhand` ➔ `127.0.0.1 UDP 9999` ➔ `Newton` ➔ `127.0.0.1 UDP 9998` ➔ `VaM Bone`
+Data loops via UDP: `VaM VRhand HMD/environment` ➔ `127.0.0.1 UDP 9999/9001/9002` ➔ `Newton` ➔ `127.0.0.1 UDP 9998` ➔ `VaM Bone`
 
 * IP addresses and ports are fully configurable for dual-PC or local setups.
 * **Virt-A-Mate Side:** Configure VR hand outbound and bone inbound settings directly from the plugin UI.
@@ -80,6 +80,7 @@ MimicKit/
 │   └── envs/
 │       ├── env_builder.py          # [改変] 独自環境「amp_env_vam.py」の追加登録
 │       ├── amp_env_vam.py          # [追加] AMP環境、観測、初期化・タスク/リセット処理
+│       ├── vam_environment_boxes.py # [追加] UDP 9001によるオブジェクト位置同期 UDP9002によるシェイプ登録
 │       ├── vam_vr_tracking.py      # [追加] UDP 9999によるVR手/HMD受信、座標変換・配置
 │       ├── vam_vr_body.py          # [追加] プレーヤー胴体/腕IKとカプセルの動的配置
 │       ├── vam_vr_physics.py       # [追加] PDコントローラによる外力制御、トリガーでのドラッグ処理
