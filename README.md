@@ -87,6 +87,9 @@ MimicKit/
 │       ├── vam_vr_assets.py        # [追加] 手/HMD/胴体のXMLアセットの自動生成
 │       ├── vam_udp_sender.py       # [追加] UDP 9998によるVaMへのリアルタイムモーション送信
 │       └── task_location_env_vam.py # [追加] 既存ファイルをVaM環境向けにパッケージ内配置
+├── data/ #設定ファイルとオリジナル 参照モーション
+├── checkpoint/
+│   └── model.pt #学習済みモデル
 ```
 
 ## License & Attributions
