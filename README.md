@@ -61,6 +61,7 @@ Run the following in your **Anaconda Prompt** :
    ```bash
    pip install -r requirements.txt
    ```
+   > **Troubleshooting (`J_ki` Error):** Depending on your GPU architecture (e.g., RTX 3090), a `J_ki`-related Warp compilation error may occur. If you encounter this error, please refer to the `patches/` folder and apply the fix to `solver.py` in your Conda environment before proceeding.
 
 5. **Run AI Inference:**
    ```bash
