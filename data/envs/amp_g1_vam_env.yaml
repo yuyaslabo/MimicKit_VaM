@@ -48,9 +48,12 @@ vam_udp_ip: "192.168.2.100"
 envbox_udp_enabled: true
 envbox_udp_ip: "0.0.0.0"
 envbox_udp_port: 9001
+envbox_shape_udp_port: 9002
 envbox_startup_timeout: 5.0
 envbox_height_scale: 0.8
 envbox_asset_dir: "data/assets/objects/vam_env_boxes"
 envbox_parking_height: 100.0
 
 vrhand_start_delay: 3.0
+vrhand_udp_ip: "0.0.0.0"
+vrhand_udp_port: 9999
