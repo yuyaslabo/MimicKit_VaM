@@ -16,6 +16,10 @@ This project runs AI inference via **Newton** in the background while Virt-A-Mat
 
 - **Desktop Mode:** Runs on a single PC. You can test the AI's **follow feature** even without a VR headset, although VR-based physical interactions are unavailable.
 - **VR Mode:** Requires substantial computing power—typically a separate dedicated PC with an NVIDIA GPU for AI inference alongside the VaM PC. *(An RTX 4070 Ti single-PC setup proved insufficient during testing.)*
+  - **Development & Tested VR Setup (Dual-PC):**
+    - **VaM PC:** NVIDIA RTX 4070 Ti / Intel Core i5-13600KF
+    - **Newton AI Inference PC:** NVIDIA RTX 3090 / Intel Core i5-11400F
+  - This dual-PC configuration was used for development, VR testing, and gameplay.
 - **Hardware Compatibility:** Tested with **Meta Quest 3 (OpenXR)**. Other HMD/controller tracking configurations have not been verified.
 
 ---
