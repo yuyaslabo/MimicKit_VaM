@@ -12,7 +12,7 @@ Run physical AI trained with MimicKit inside Virt-A-Mate (VaM). Interact with th
 
 ## Overview
 
-This project runs AI inference via **Newton** while Virt-A-Mate runs. **A pre-trained physical AI model is included for immediate use.** The AI character can follow the player, face a direction selected with a VR controller, and detect furniture as obstacles to avoid. **Furniture collision support is currently intended for obstacle detection and avoidance, not furniture manipulation.**
+This project runs AI inference via **Newton** while Virt-A-Mate runs. **A pre-trained physical AI model is included for immediate use.** The AI character can follow the player, face a direction selected with a VR controller, and detect furniture as obstacles to avoid. **Furniture collision support enables physical interactions with obstacles, including collision responses, balance recovery, and falling. Furniture manipulation is not currently supported.**
 
 - **Desktop Mode:** Runs on a single PC. You can test the AI's **follow feature** without a VR headset, although VR-based physical interactions are unavailable.
 - **VR Mode:** Requires substantial computing power—typically a separate PC with an NVIDIA GPU for AI inference alongside the VaM PC. *(An RTX 4070 Ti single-PC setup proved insufficient during testing.)*
