@@ -57,3 +57,12 @@ envbox_parking_height: 100.0
 vrhand_start_delay: 3.0
 vrhand_udp_ip: "0.0.0.0"
 vrhand_udp_port: 9999
+
+envbox_simplify_apply: true
+
+envbox_simplify_thin: 0.08
+envbox_simplify_gap: 0.03
+envbox_simplify_size_tolerance: 0.10
+envbox_simplify_rotation_tolerance: 3.0
+envbox_simplify_max_volume_ratio: 1.18
+envbox_simplify_overlap_ratio: 0.70

@@ -40,8 +40,8 @@ class VRTrackingMixin:
     def _update_vrhand_boxes(self):
         if not self._vrhand_enabled or self._vrhand_socket is None:
             return
-        # 💡 self._vrhand_box_ids を [左手ID, 右手ID, HMD_ID] の3つの要素にしてください
-        if len(self._vrhand_box_ids) != 3:
+        # Hand physics IDs only; HMD remains UDP tracking-only.
+        if len(self._vrhand_box_ids) != 2:
             return
 
         if not hasattr(self, '_prev_vrhand_pos'):
@@ -90,7 +90,7 @@ class VRTrackingMixin:
             self._vrhand_triggers = {"left": 0.0, "right": 0.0}
             self._vrhand_trigger_pressed = {"left": False, "right": False}
             self._vrhand_last_unlocked_press = {"left": None, "right": None}
-            print("[VRHand] Startup delay finished; hand/HMD/body synchronization enabled", flush=True)
+            print("[VRHand] Startup delay finished; hand/HMD tracking and torso synchronization enabled", flush=True)
 
         if latest_packet is not None:
             # 23個のfloatを展開
@@ -122,13 +122,8 @@ class VRTrackingMixin:
         dt = 1.0 / 30.0
         gravity = 9.81
 
-        # 各データのオフセットと、対応するオブジェクトIDのペア
-        # 左手(0番目から7個+トリガー1), 右手(8番目から7個+トリガー1), HMD(16番目から7個)
-        targets = (
-            (0, self._vrhand_box_ids[0]), # 左手
-            (8, self._vrhand_box_ids[1]), # 右手
-            (16, self._vrhand_box_ids[2]) # HMD
-        )
+        # The HMD retains its packet slot but has no physical rigid object.
+        targets = ((0, self._vrhand_box_ids[0]), (8, self._vrhand_box_ids[1]), (16, None))
 
         tracked = {}
         for offset, obj_id in targets:
@@ -157,42 +152,31 @@ class VRTrackingMixin:
                 # print(f"[VRHand Debug] {target_name} -> Final Engine Pos: {pos_np}")
 
             pos = torch.as_tensor(pos_np, device=self._device, dtype=torch.float32).reshape(1, 3)
-            raw_quat = torch.as_tensor(quat_np, device=self._device, dtype=torch.float32)
-            quat = torch.zeros(4, device=self._device, dtype=torch.float32)
-            quat[0] = raw_quat[1]  # 左右の傾きを前後の傾きへ
-            quat[1] = -raw_quat[0]  # 前後の傾きを左右の傾きへ
-            quat[2] = raw_quat[2]  # ヨー回転（合っている回転）
-            quat[3] = raw_quat[3]  # W成分
-            
+            # Complete quaternion remap/normalization on CPU (UDP source is CPU).
+            q = np.asarray([quat_np[1], -quat_np[0], quat_np[2], quat_np[3]], dtype=np.float32)
             if offset == 16:
-                quat[0] = 0.0
-                quat[1] = 0.0
-                #pos_np[2] = pos_np[2] - 0.1
-            
-            mag = torch.norm(quat)
-            if mag > 1e-6:
-                quat = quat / mag
+                q[:2] = 0.0
+            qmag = float(np.linalg.norm(q))
+            if qmag > 1e-6:
+                q /= qmag
             else:
-                quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self._device, dtype=torch.float32)
-                
+                q = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+            quat = torch.as_tensor(q, device=self._device, dtype=torch.float32)
             if offset == 16:
                 self._latest_hmd_pos = pos.clone()
                 self._latest_hmd_quat = quat.clone()
-                # Set only after a valid HMD pose has actually been applied.
-                # Unlike packet_count this cannot be triggered by hand-only/invalid data.
                 self._hmd_pose_received = True
-                
-            # Keep the same transformed coordinates as the original hand/HMD colliders.
-            tracked[offset] = (pos_np.astype(np.float64).copy(), quat.detach().cpu().numpy().copy())
+            tracked[offset] = (pos_np.astype(np.float64).copy(), q.astype(np.float64).copy())
+            # HMD pose is needed for torso positioning and target/facing,
+            # but there is no head rigid body to update.
+            if offset == 16:
+                continue
             # 速度計算
             if obj_id in self._prev_vrhand_pos:
                 prev_pos = self._prev_vrhand_pos[obj_id]
                 vel = (pos - prev_pos) / dt
-                speed = torch.norm(vel)
-                if speed < 0.03:
-                    vel = torch.zeros_like(vel)
-                elif speed > 3.0:
-                    vel = (vel / speed) * 3.0
+                speed = torch.linalg.vector_norm(vel)
+                vel = torch.where(speed < 0.03, torch.zeros_like(vel), vel * (3.0 / speed.clamp_min(3.0)))
             else:
                 vel = torch.zeros((1, 3), device=self._device, dtype=torch.float32)
 
@@ -204,7 +188,7 @@ class VRTrackingMixin:
 
             if self._vrpd_enabled and offset in (0, 8):
                 name = "left_hand" if offset == 0 else "right_hand"
-                self._vrpd_target(name, obj_id, compensated_pos.detach().cpu().numpy().reshape(3), quat.detach().cpu().numpy(), env_ids)
+                self._vrpd_target(name, obj_id, compensated_pos, quat, env_ids)
                 continue
             self._engine.set_root_pos(env_ids, obj_id, compensated_pos)
             self._engine.set_root_rot(env_ids, obj_id, quat)

@@ -35,6 +35,9 @@ def build_agent(agent_file, env, device):
     elif (agent_name == "LCP"):
         import learning.lcp_agent as lcp_agent
         agent = lcp_agent.LCPAgent(config=agent_config, env=env, device=device)
+    elif (agent_name == "Inference"):
+        import learning.inference_agent as inference_agent
+        agent = inference_agent.InferenceAgent(config=agent_config, env=env, device=device)
     else:
         assert(False), "Unsupported agent: {}".format(agent_name)
 

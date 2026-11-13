@@ -1,3 +1,9 @@
+"""Experimental pose-update optimization for VaM environment boxes.
+
+Modes: original (unchanged baseline), cached (cached conversions, 30 Hz pose writes),
+packet (writes on fresh 2 Hz UDP packet only; freejoint gravity drift expected).
+Geometry creation, collider fidelity and UDP formats are unchanged.
+"""
 """VaM compound collider MJCF assets + pose sync for MimicKit/Newton.
 
 Port 9001: original 0.5s Atom poses, unchanged.
@@ -17,6 +23,7 @@ import torch
 from scipy.spatial.transform import Rotation
 
 import engines.engine as engine
+from envs.collider_simplifier import simplify_mjcf
 
 
 class EnvironmentBoxesMixin:
@@ -35,6 +42,36 @@ class EnvironmentBoxesMixin:
         self._envbox_objects = {}  # Atom ID -> Newton obj_id (only populated for env 0)
         self._envbox_active = set()
         self._envbox_last_warning = 0.0
+        # Pose update experiment. 'cached' preserves continuous freejoint stabilization.
+        self._envbox_pose_apply_mode = str(config.get('envbox_pose_apply_mode', 'cached')).lower()
+        if self._envbox_pose_apply_mode not in ('original', 'cached', 'packet'):
+            raise ValueError('envbox_pose_apply_mode must be original, cached or packet')
+        self._envbox_pose_seq = 0
+        self._envbox_pose_cache_seq = -1
+        self._envbox_pose_cache = {}
+        self._envbox_cached_available = set()
+        self._envbox_applied_seq = -1
+        self._envbox_last_available = set()
+        self._envbox_cached_env_ids = None
+        self._envbox_cached_other_env_ids = None
+        self._envbox_cached_all_env_ids = None
+        self._envbox_cached_park = {}
+        self._envbox_diag = bool(config.get('envbox_pose_diag', False))
+        # Safe trial: create comparison XML files without changing the runtime model.
+        # Set 'apply' to true only after inspecting the previews, then restart Newton.
+        self._envbox_simplify_preview = bool(config.get('envbox_simplify_preview', True))
+        self._envbox_simplify_apply = bool(config.get('envbox_simplify_apply', False))
+        self._envbox_simplify_thin = float(config.get('envbox_simplify_thin', 0.08))
+        self._envbox_simplify_gap = float(config.get('envbox_simplify_gap', 0.03))
+        self._envbox_simplify_size_tolerance = float(config.get('envbox_simplify_size_tolerance', 0.10))
+        self._envbox_simplify_rotation_tolerance = float(config.get('envbox_simplify_rotation_tolerance', 3.0))
+        self._envbox_simplify_max_volume_ratio = float(config.get('envbox_simplify_max_volume_ratio', 1.18))
+        self._envbox_simplify_overlap_ratio = float(config.get('envbox_simplify_overlap_ratio', 0.70))
+
+        self._envbox_diag_time = time.monotonic()
+        self._envbox_diag_calls = 0
+        self._envbox_diag_pose_writes = 0
+        self._envbox_diag_cost = 0.0
         self._envbox_height_scale = float(config.get('envbox_height_scale', 0.8))
         self._envbox_position_offset = np.asarray(
             config.get('vrhand_position_offset', [0.0, 0.15, 0.0]), dtype=np.float64)
@@ -66,6 +103,7 @@ class EnvironmentBoxesMixin:
             # Both sockets MUST be bound before waiting, to avoid losing the one-shot
             # shape packet when the first pose packet arrives later.
             self._envbox_load_assets()
+            self._envbox_prepare_simplify_previews()
             if timeout:
                 print(f'[EnvBox] Awaiting VaM shapes UDP:{self._envbox_shape_port} '
                       f'and poses UDP:{self._envbox_port} for up to {timeout:g}s', flush=True)
@@ -151,6 +189,7 @@ class EnvironmentBoxesMixin:
                                               'restart Newton to load its colliders')
                 else:
                     self._envbox_latest = self._envbox_decode(packet)
+                    self._envbox_pose_seq += 1
                     self._envbox_pending_pose_ids.update(
                         set(self._envbox_latest).difference(self._envbox_assets))
             except (ValueError, OverflowError) as exc:
@@ -195,6 +234,35 @@ class EnvironmentBoxesMixin:
             if atom_id in self._envbox_assets:
                 raise ValueError(f'Duplicate MJCF asset ID {atom_id} in {self._envbox_asset_dir}')
             self._envbox_assets[atom_id] = os.path.join(self._envbox_asset_dir, filename)
+
+    def _envbox_prepare_simplify_previews(self):
+        if not (self._envbox_simplify_preview or self._envbox_simplify_apply):
+            return
+        for atom_id, path in list(self._envbox_assets.items()):
+            self._envbox_preview_one(atom_id, path)
+
+    def _envbox_preview_one(self, atom_id, original_path):
+        preview_dir = os.path.join(self._envbox_asset_dir, '__simplify_preview')
+        preview_path = os.path.join(preview_dir, f'atom_{atom_id}.xml')
+        opts = dict(thin=self._envbox_simplify_thin,
+                    gap=self._envbox_simplify_gap,
+                    size_tolerance=self._envbox_simplify_size_tolerance,
+                    rotation_tolerance=self._envbox_simplify_rotation_tolerance,
+                    max_volume_ratio=self._envbox_simplify_max_volume_ratio,
+                    overlap_ratio=self._envbox_simplify_overlap_ratio)
+        try:
+            result = simplify_mjcf(original_path, preview_path, **opts)
+            print(f"[EnvBox Simplify] ID={atom_id} original={result['original_boxes']} "
+                  f"thin={result['removed_thin']} merged={result['merged_pairs']} "
+                  f"final={result['final_boxes']} "
+                  f"mode={'APPLY' if self._envbox_simplify_apply else 'PREVIEW'} "
+                  f"file={preview_path}", flush=True)
+            if self._envbox_simplify_apply and result['final_boxes'] > 0:
+                self._envbox_assets[atom_id] = preview_path
+            elif self._envbox_simplify_apply and result['final_boxes'] == 0:
+                print(f'[EnvBox Simplify] ID={atom_id}: all boxes filtered, retaining original', flush=True)
+        except Exception as exc:
+            print(f'[EnvBox Simplify] ID={atom_id}: preview FAILED ({exc}); retaining original', flush=True)
 
     def _envbox_register_shape_asset(self, atom_id, shapes):
         """Build one rigid body with multiple box geoms, using C# local shapes.
@@ -244,6 +312,8 @@ class EnvironmentBoxesMixin:
         except FileExistsError:
             print(f'[EnvBox] Existing MJCF preserved ID={atom_id} -> {path}', flush=True)
         self._envbox_assets[atom_id] = path
+        if self._envbox_simplify_preview or self._envbox_simplify_apply:
+            self._envbox_preview_one(atom_id, path)
         return True
 
     def _envbox_build_objects(self, env_id):
@@ -277,6 +347,8 @@ class EnvironmentBoxesMixin:
             self._envbox_set_pose(env_ids, obj_id, self._envbox_park_position(atom_id),
                                   np.array([0., 0., 0., 1.], dtype=np.float32))
         self._envbox_active.clear()
+        self._envbox_applied_seq = -1
+        self._envbox_last_available.clear()
 
     def _envbox_set_pose(self, env_ids, obj_id, pos, quat):
         n = len(env_ids)
@@ -287,7 +359,7 @@ class EnvironmentBoxesMixin:
         self._engine.set_root_vel(env_ids, obj_id, 0.0)
         self._engine.set_root_ang_vel(env_ids, obj_id, 0.0)
 
-    def _envbox_sync(self):
+    def _envbox_sync_original(self):
         if not self._envbox_enabled or self._envbox_socket is None:
             return
         # UDP:9002 geometry arrives only on plugin start / new Atom. Receive it
@@ -338,3 +410,119 @@ class EnvironmentBoxesMixin:
         if now - self._envbox_last_warning >= 2.0:
             self._envbox_last_warning = now
             print('[EnvBox] ' + message, flush=True)
+
+    def _envbox_get_env_ids(self):
+        # Cache only once for this runtime. The number of environments is fixed.
+        if self._envbox_cached_all_env_ids is None:
+            self._envbox_cached_all_env_ids = torch.arange(
+                self.get_num_envs(), device=self._device, dtype=torch.long)
+            self._envbox_cached_env_ids = self._envbox_cached_all_env_ids[:1]
+            self._envbox_cached_other_env_ids = self._envbox_cached_all_env_ids[1:]
+        return (self._envbox_cached_all_env_ids, self._envbox_cached_env_ids,
+                self._envbox_cached_other_env_ids)
+
+    def _envbox_get_park_tensors(self, atom_id):
+        cached = self._envbox_cached_park.get(atom_id)
+        if cached is None:
+            p = torch.as_tensor(self._envbox_park_position(atom_id),
+                                device=self._device, dtype=torch.float32)
+            q = torch.tensor([0., 0., 0., 1.], device=self._device, dtype=torch.float32)
+            cached = (p, q)
+            self._envbox_cached_park[atom_id] = cached
+        return cached
+
+    def _envbox_apply_tensors(self, env_ids, obj_id, p, q):
+        if len(env_ids) == 0:
+            return
+        n = len(env_ids)
+        self._engine.set_root_pos(env_ids, obj_id, p.reshape(1, 3).expand(n, -1))
+        self._engine.set_root_rot(env_ids, obj_id, q)
+        self._engine.set_root_vel(env_ids, obj_id, 0.0)
+        self._engine.set_root_ang_vel(env_ids, obj_id, 0.0)
+        self._envbox_diag_pose_writes += 1
+
+    def _envbox_rebuild_pose_cache(self):
+        if self._envbox_pose_cache_seq == self._envbox_pose_seq:
+            return
+        C = self._envbox_axis
+        poses = {}
+        available = set(self._envbox_latest).intersection(self._envbox_objects)
+        for atom_id in available:
+            pos, _size_ignored, quat = self._envbox_latest[atom_id]
+            p = C @ (pos - self._envbox_position_offset)
+            p[2] = p[2] * self._envbox_height_scale + 0.22
+            q = Rotation.from_matrix(C @ Rotation.from_quat(quat).as_matrix() @ C.T).as_quat()
+            poses[atom_id] = (
+                torch.as_tensor(p, device=self._device, dtype=torch.float32),
+                torch.as_tensor(q, device=self._device, dtype=torch.float32))
+        self._envbox_pose_cache = poses
+        self._envbox_cached_available = available
+        self._envbox_pose_cache_seq = self._envbox_pose_seq
+
+    def _envbox_sync_optimized(self):
+        if not self._envbox_enabled or self._envbox_socket is None:
+            return
+        t0 = time.perf_counter() if self._envbox_diag else None
+        self._envbox_read_socket(self._envbox_shape_socket)
+        self._envbox_read_socket(self._envbox_socket)
+        if self._envbox_pending_pose_ids:
+            missing = self._envbox_pending_pose_ids.difference(self._envbox_assets)
+            if missing:
+                self._envbox_warn(f'No shape for Atom IDs {sorted(missing)}; '
+                                  'awaiting UDP:9002, NOT creating a giant fallback box')
+            self._envbox_pending_pose_ids = missing
+        if not self._envbox_objects:
+            return
+        self._envbox_rebuild_pose_cache()
+        all_ids, env_ids, other_ids = self._envbox_get_env_ids()
+        available = self._envbox_cached_available
+        # In packet mode, only update on new UDP pose packets. This is NOT physically
+        # equivalent to the original: freejoint bodies fall under gravity between packets.
+        new_packet = self._envbox_applied_seq != self._envbox_pose_seq
+        if self._envbox_pose_apply_mode == 'packet' and not new_packet:
+            self._envbox_diag_record(t0)
+            return
+        for atom_id, obj_id in self._envbox_objects.items():
+            if atom_id not in available:
+                # Continuous mode keeps inactive freejoint bodies parked against gravity.
+                if self._envbox_pose_apply_mode == 'cached' or atom_id in self._envbox_last_available or self._envbox_applied_seq < 0:
+                    self._envbox_apply_tensors(all_ids, obj_id, *self._envbox_get_park_tensors(atom_id))
+                if atom_id in self._envbox_active:
+                    print(f'[EnvBox] Deactivated ID={atom_id}', flush=True)
+                    self._envbox_active.remove(atom_id)
+            elif len(other_ids):
+                if self._envbox_pose_apply_mode == 'cached' or new_packet:
+                    self._envbox_apply_tensors(other_ids, obj_id, *self._envbox_get_park_tensors(atom_id))
+        for atom_id in sorted(available):
+            self._envbox_apply_tensors(env_ids, self._envbox_objects[atom_id], *self._envbox_pose_cache[atom_id])
+            if atom_id not in self._envbox_active:
+                print(f'[EnvBox] Activated ID={atom_id}', flush=True)
+                self._envbox_active.add(atom_id)
+        self._envbox_last_available = set(available)
+        self._envbox_applied_seq = self._envbox_pose_seq
+        self._envbox_diag_record(t0)
+
+    def _envbox_diag_record(self, start):
+        if start is None:
+            return
+        self._envbox_diag_cost += (time.perf_counter() - start) * 1000.0
+        self._envbox_diag_calls += 1
+        now = time.monotonic()
+        elapsed = now - self._envbox_diag_time
+        if elapsed >= 5.0:
+            avg = self._envbox_diag_cost / max(self._envbox_diag_calls, 1)
+            print(f'[EnvBox PERF] mode={self._envbox_pose_apply_mode} '
+                  f'calls={self._envbox_diag_calls} writes={self._envbox_diag_pose_writes} '
+                  f'avg_sync={avg:.3f}ms over {elapsed:.1f}s', flush=True)
+            self._envbox_diag_time = now
+            self._envbox_diag_calls = 0
+            self._envbox_diag_pose_writes = 0
+            self._envbox_diag_cost = 0.0
+
+    def _envbox_sync(self):
+        if self._envbox_pose_apply_mode == 'original':
+            start = time.perf_counter() if self._envbox_diag else None
+            result = self._envbox_sync_original()
+            self._envbox_diag_record(start)
+            return result
+        return self._envbox_sync_optimized()

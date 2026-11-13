@@ -2,12 +2,242 @@
 # Modified by [LocalAIVRLab] in 2026 for integration with Virt-A-Mate (VaM).
 # Licensed under the Apache License, Version 2.0.
 
+import time
 import numpy as np
 import torch
 from scipy.spatial.transform import Rotation as R
 
 
 class VaMUDPMixin:
+    # Existing body conversion retained as fallback only.
+    # Legs and arms override rotations via MJCF joint FK.
+    _vam_limb_parts = frozenset((
+        "rhand", "lhand", "relbow", "lelbow", "rarm", "larm",
+        "rfoot", "lfoot", "rshin", "lshin", "rthigh", "lthigh",
+    ))
+    _vam_limb_basis = np.array([
+        [0., -1., 0.],
+        [0.,  0., 1.],
+        [1.,  0., 0.],
+    ], dtype=np.float64)
+
+    @staticmethod
+    def _vam_newton_rotation(quat):
+        """MimicKit body quaternion [w,x,y,z] -> scipy Rotation."""
+        q = np.asarray(quat, dtype=np.float64).reshape(-1)
+        if q.size != 4 or not np.all(np.isfinite(q)) or np.linalg.norm(q) < 1e-8:
+            return R.identity()
+        return R.from_quat([q[1], q[2], q[3], q[0]] / np.linalg.norm(q))
+
+    def _vam_limb_bind(self, key):
+        """Fixed CP rest-orientation only; no dynamic axis permutations."""
+        bind_quats = getattr(self, "_vam_limb_bind_quat_xyzw", {})
+        if key in bind_quats:
+            q = np.asarray(bind_quats[key], dtype=np.float64).reshape(-1)
+            if q.size != 4 or not np.all(np.isfinite(q)) or np.linalg.norm(q) < 1e-8:
+                raise ValueError("Invalid vam_limb_bind_quat_xyzw for " + key)
+            return R.from_quat(q / np.linalg.norm(q))
+        # 左右で独立して調整
+        arm_offsets = {
+            "rhand":  [-90.0, -90.0, 0.0],
+            "lhand":  [-90.0, 90.0, 0.0],
+            "relbow": [-90.0, -90.0, 0.0],
+            "lelbow": [-90.0, 90.0, 0.0],
+            "rarm": [-90.0, -90.0, 0.0],
+            "larm": [-90.0, 90.0, 0.0],
+        }
+
+        default = arm_offsets.get(
+            key,
+            [(-80.0 if key in ("rfoot", "lfoot") else -90.0), 0., 0.]
+        )
+        #default = [(-70.0 if key in ("rfoot", "lfoot") else -90.0), 0., 0.]
+        euler = getattr(self, "_vam_limb_bind_euler_deg", {}).get(key, default)
+        return R.from_euler("xyz", euler, degrees=True)
+
+    def _vam_limb_pelvis_relative_rotation(self, quat, pelvis_quat, pelvis_vam_world, key):
+        """Single matrix basis for all 12 limbs. Never mix Euler remapping."""
+        relative_n = self._vam_newton_rotation(pelvis_quat).inv() * self._vam_newton_rotation(quat)
+        m = self._vam_limb_basis
+        relative_v = R.from_matrix(m @ relative_n.as_matrix() @ m.T)
+        return pelvis_vam_world * relative_v * self._vam_limb_bind(key)
+
+    # Bilateral G1 leg FK. DoF indices assume MimicKit's 29-DoF order
+    # follows the supplied G1 actuator list (not guaranteed by MJCF).
+    # Left 0..5, right 6..11. Validate angles from the logs.
+    _vam_leg_fk_indices = {"L": (0, 1, 2, 3, 4, 5),
+                           "R": (6, 7, 8, 9, 10, 11)}
+    _vam_leg_fk_diag_enabled = False
+    _vam_leg_fk_diag_interval_sec = 1.0
+
+    @staticmethod
+    def _vam_leg_fk_mjcf(dof6, side):
+        """Pelvis-local G1 orientations for thigh, shin, foot (MJCF).
+
+        Both provided left/right XML excerpts use the SAME body-frame
+        fixed rotations on hip_roll_link and knee_link. Their inertial
+        quaternions are deliberately NOT applied (inertial frame only).
+        """
+        hp, hr, hy, kn, ap, ar = [float(v) for v in dof6]
+        if side not in ("L", "R"):
+            raise ValueError("Invalid FK side: %s" % side)
+        hip_roll_bind = R.from_quat([0., -0.0873386, 0., 0.996179])
+        knee_bind = R.from_quat([0., +0.0873386, 0., 0.996179])
+        q_thigh = (R.from_rotvec([0., hp, 0.])
+                   * hip_roll_bind
+                   * R.from_rotvec([hr, 0., 0.])
+                   * R.from_rotvec([0., 0., hy]))
+        q_shin = q_thigh * knee_bind * R.from_rotvec([0., kn, 0.])
+        q_foot = (q_shin * R.from_rotvec([0., ap, 0.])
+                  * R.from_rotvec([ar, 0., 0.]))
+        prefix = 'l' if side == 'L' else 'r'
+        return {prefix + 'thigh': q_thigh,
+                prefix + 'shin': q_shin,
+                prefix + 'foot': q_foot}
+
+    def _vam_apply_both_legs_6dof_fk(self, char_id, pelvis_vam_rot, data):
+        """Apply MJCF FK to both legs, leaving ALL positions untouched.
+
+        Body orientations are not referenced here. Both legs share the
+        proven right-leg basis conversion and per-control bind logic.
+        Read DoFs once; calculate both before committing either leg.
+        """
+        try:
+            dofs = np.asarray(self._vam_to_numpy(
+                self._engine.get_dof_pos(char_id)), dtype=np.float64)
+            if dofs.ndim == 2:
+                dofs = dofs[0]
+            if dofs.ndim != 1:
+                raise ValueError('get_dof_pos shape=%s' % (dofs.shape,))
+            if dofs.size <= 11:
+                raise ValueError('get_dof_pos size=%d (need >=12)' % dofs.size)
+            basis = self._vam_limb_basis
+            pending = {}
+            logs = []
+            for side in ('L', 'R'):
+                indices = self._vam_leg_fk_indices[side]
+                angles = dofs[list(indices)]
+                if not np.all(np.isfinite(angles)):
+                    raise ValueError('nonfinite %s leg DoFs' % side)
+                leg_fk = self._vam_leg_fk_mjcf(angles, side)
+                for label, rel in leg_fk.items():
+                    rel_v = R.from_matrix(basis @ rel.as_matrix() @ basis.T)
+                    pending[label] = (pelvis_vam_rot * rel_v
+                                      * self._vam_limb_bind(label))
+                logs.append((side, angles))
+            for label, rotation in pending.items():
+                data[label]['rot'] = rotation
+        except Exception as exc:
+            now = time.monotonic()
+            if now - getattr(self, '_vam_leg_fk_error_last', -1e10) >= 2.0:
+                self._vam_leg_fk_error_last = now
+                print('[LEG-FK] fallback to Body rotation: %s' % exc,
+                      flush=True)
+            return False
+
+        if self._vam_leg_fk_diag_enabled:
+            now = time.monotonic()
+            if now - getattr(self, '_vam_leg_fk_diag_last', -1e10) >= self._vam_leg_fk_diag_interval_sec:
+                self._vam_leg_fk_diag_last = now
+                names = ('hipP', 'hipR', 'hipY', 'knee', 'ankP', 'ankR')
+                for side, angles in logs:
+                    fields = ' '.join('%s=%+6.1f' % (name, np.rad2deg(val))
+                                      for name, val in zip(names, angles))
+                    print('[LEG-FK %s] %s' % (side, fields), flush=True)
+        return True
+
+    # Bilateral G1 arm FK: left indices 15..21, right 22..28.
+    # Anchor is the torso (waist-pitch) body, NOT pelvis: preserves waist rotation.
+    # The user-supplied MJCF has opposite shoulder static quaternions L/R.
+    _vam_arm_fk_indices = {"L": (15, 16, 17, 18, 19, 20, 21),
+                           "R": (22, 23, 24, 25, 26, 27, 28)}
+    _vam_arm_fk_diag_enabled = False
+    _vam_arm_fk_diag_interval_sec = 1.0
+
+    @staticmethod
+    def _vam_arm_fk_mjcf(dof7, side):
+        """Torso-local G1 shoulder-yaw, elbow, wrist-yaw orientations.
+
+        MJCF fixed body quaternions are wxyz; SciPy accepts xyzw.
+        Note inertial quats are NOT body-frame transforms.
+        Each hinge axis belongs to that body's local coordinate system.
+        """
+        sp, sr, sy, el, wr, wp, wy = [float(v) for v in dof7]
+        if side == 'L':
+            shoulder_pitch_bind_wxyz = (0.990264, 0.139201, 0.0000138722, -0.0000986868)
+            shoulder_roll_bind_wxyz = (0.990268, -0.139172, 0.0, 0.0)
+            prefix = 'l'
+        elif side == 'R':
+            shoulder_pitch_bind_wxyz = (0.990264, -0.139201, 0.0000138722, 0.0000986868)
+            shoulder_roll_bind_wxyz = (0.990268, 0.139172, 0.0, 0.0)
+            prefix = 'r'
+        else:
+            raise ValueError('Invalid FK side: %s' % side)
+
+        def from_wxyz(q):
+            w, x, y, z = q
+            return R.from_quat([x, y, z, w])
+
+        q_pitch = from_wxyz(shoulder_pitch_bind_wxyz) * R.from_rotvec([0., sp, 0.])
+        q_roll = q_pitch * from_wxyz(shoulder_roll_bind_wxyz) * R.from_rotvec([sr, 0., 0.])
+        q_arm = q_roll * R.from_rotvec([0., 0., sy])
+        q_elbow = q_arm * R.from_rotvec([0., el, 0.])
+        q_wrist_roll = q_elbow * R.from_rotvec([wr, 0., 0.])
+        q_wrist_pitch = q_wrist_roll * R.from_rotvec([0., wp, 0.])
+        q_hand = q_wrist_pitch * R.from_rotvec([0., 0., wy])
+        # rarm/larm = shoulder_yaw_link, elbow = elbow_link,
+        # hand = wrist_yaw_link (per original Body index mapping).
+        return {prefix + 'arm': q_arm,
+                prefix + 'elbow': q_elbow,
+                prefix + 'hand': q_hand}
+
+    def _vam_apply_both_arms_7dof_fk(self, char_id, torso_vam_rot, data):
+        """Change only six arm control rotations; positions remain unchanged.
+
+        FK calculated in the MJCF torso frame, then mapped to the same
+        torso-local VaM basis. With no body rotations, fallback remains intact.
+        """
+        try:
+            dofs = np.asarray(self._vam_to_numpy(
+                self._engine.get_dof_pos(char_id)), dtype=np.float64)
+            if dofs.ndim == 2:
+                dofs = dofs[0]
+            if dofs.ndim != 1 or dofs.size < 29:
+                raise ValueError('get_dof_pos needs 29 values, got %s' % (dofs.shape,))
+            basis = self._vam_limb_basis
+            pending = {}
+            logs = []
+            for side in ('L', 'R'):
+                angles = dofs[list(self._vam_arm_fk_indices[side])]
+                if not np.all(np.isfinite(angles)):
+                    raise ValueError('nonfinite %s arm DoFs' % side)
+                fk = self._vam_arm_fk_mjcf(angles, side)
+                for label, rel in fk.items():
+                    rel_v = R.from_matrix(basis @ rel.as_matrix() @ basis.T)
+                    pending[label] = (torso_vam_rot * rel_v
+                                      * self._vam_limb_bind(label))
+                logs.append((side, angles))
+            for label, rotation in pending.items():
+                data[label]['rot'] = rotation
+        except Exception as exc:
+            now = time.monotonic()
+            if now - getattr(self, '_vam_arm_fk_error_last', -1e10) >= 2.0:
+                self._vam_arm_fk_error_last = now
+                print('[ARM-FK] fallback to Body rotation: %s' % exc,
+                      flush=True)
+            return False
+
+        if self._vam_arm_fk_diag_enabled:
+            now = time.monotonic()
+            if now - getattr(self, '_vam_arm_fk_diag_last', -1e10) >= self._vam_arm_fk_diag_interval_sec:
+                self._vam_arm_fk_diag_last = now
+                names = ('shP', 'shR', 'shY', 'elbow', 'wrR', 'wrP', 'wrY')
+                for side, angles in logs:
+                    fields = ' '.join('%s=%+6.1f' % (name, np.rad2deg(val))
+                                      for name, val in zip(names, angles))
+                    print('[ARM-FK %s] %s' % (side, fields), flush=True)
+        return True
+
     def _vam_to_numpy(self, value):
         if torch.is_tensor(value):
             return value.detach().to("cpu").numpy()
@@ -45,7 +275,7 @@ class VaMUDPMixin:
         
         if key in ("rfoot", "lfoot"):
             # # 入れ替え後の [e_y, -e_z, -e_x] の第3引数である「-e_x」がプラスマイナス反転して「e_x」になります
-            unity_local_rot = R.from_euler('zxy', [e_y, e_z, e_x], degrees=True)
+            unity_local_rot = R.from_euler('zxy', [e_x, e_z, e_y], degrees=True)
         elif key in ("relbow", "rhand"):
             unity_local_rot = R.from_euler('zxy', [e_z+90, e_y, e_x], degrees=True)
         elif key in ("lelbow","lhand"):
@@ -164,17 +394,36 @@ class VaMUDPMixin:
                 else:
                     q_vec = root_rot
                 
-                # 🟢 【今回の核心】
-                # すべてのボーンに「生の骨盤クォータニオン」を渡し、一度ローカルに戻して処理をさせる
-                local_unity_rot = self._vam_quat_xyzw(q_vec, label, pelvis_quat=pelvis_q_base)
-                
-                # 🟢 最後にUnity側の骨盤ワールド回転と掛け合わせることで、破綻のない世界座標を生成
-                if label == "pelvis":
-                    rot_conv = local_unity_rot
+                # 12 limbs share ONE pelvis-relative matrix mapping.
+                # Ankle axis correction is NOT applied here (Newton-side
+                # correction previously cancelled with this basis mapping).
+                if label in self._vam_limb_parts:
+                    rot_conv = self._vam_limb_pelvis_relative_rotation(
+                        q_vec, pelvis_q_base, pelvis_rot_converted, label
+                    )
                 else:
-                    rot_conv = pelvis_rot_converted * local_unity_rot
-                
+                    # Preserve proven torso / head / pelvis implementation.
+                    local_unity_rot = self._vam_quat_xyzw(
+                        q_vec, label, pelvis_quat=pelvis_q_base
+                    )
+                    rot_conv = (local_unity_rot if label == "pelvis"
+                                else pelvis_rot_converted * local_unity_rot)
+
                 raw_spatial_data[label] = {"pos": pos_conv.copy(), "rot": rot_conv}
+
+            # Both legs: MJCF joint FK from independent 6-DoF chains.
+            # No additional output-space ankle correction for either leg.
+            # This deliberately matches the previously successful RIGHT leg.
+            self._vam_apply_both_legs_6dof_fk(
+                char_id, pelvis_rot_converted, raw_spatial_data
+            )
+
+            # Both arms: 7DoF FK, parent = torso (waist-pitch link).
+            # Use the EXISTING correctly converted torso rotation; do not
+            # change torso/head/pelvis, body positions, or leg FK.
+            self._vam_apply_both_arms_7dof_fk(
+                char_id, raw_spatial_data['torso']['rot'], raw_spatial_data
+            )
 
             # 🟢 【STEP 1: 骨盤回転を考慮したローカル空間での足伸ばし】
             extended_positions = {}
@@ -219,7 +468,7 @@ class VaMUDPMixin:
             lift_offset_y = original_lowest_y - extended_lowest_y
 
             # 🟢 【STEP 3: 全身のボーンに床基準のオフセットを一括適用して最終確定】
-            local_offset = np.array([0.0, -0.05, 0.0])
+            local_offset = np.array([0.0, -0.0, 0.0])
             world_offset = R_pelvis.apply(local_offset)
             final_positions = {}
             for label in raw_spatial_data.keys():
@@ -235,8 +484,7 @@ class VaMUDPMixin:
             torso_p,  torso_q  = final_positions["torso"],  raw_spatial_data["torso"]["rot"]
             head_p,   head_q   = final_positions["head"],   raw_spatial_data["head"]["rot"]
             
-            # 💡 角度を設定（例：+2度。下を向くか上を向くかはVaMのボーン仕様によります）
-            # 数値をマイナス（-2.0など）にすれば逆方向に回転します
+
             
             
             rhand_p,  rhand_q  = final_positions["rhand"],  raw_spatial_data["rhand"]["rot"]

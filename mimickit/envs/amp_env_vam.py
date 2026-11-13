@@ -1,8 +1,10 @@
+# Inference-only version: AMP discriminator observations removed.
+# Actor observation and DeepMimic reference-motion path are unchanged.
+# Preserve Apache-2.0 original attribution below.
 # Original code authored by Xue Bin Peng (MimicKit)
 # Modified by [LocalAIVRLab] in 2026 for integration with Virt-A-Mate (VaM).
 # Licensed under the Apache License, Version 2.0.
 
-import gymnasium.spaces as spaces
 import os
 import socket
 import struct
@@ -11,8 +13,6 @@ import torch
 
 import engines.engine as engine
 import envs.deepmimic_env as deepmimic_env
-import util.circular_buffer as circular_buffer
-import util.torch_util as torch_util
 #import envs.task_location_env as task_location_env
 from scipy.spatial.transform import Rotation as R
 
@@ -28,8 +28,6 @@ from envs.vam_environment_boxes import EnvironmentBoxesMixin
 class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDPMixin, EnvironmentBoxesMixin, deepmimic_env.DeepMimicEnv):
     def __init__(self, env_config, engine_config, num_envs, device, visualize, record_video=False):
         #self._rand_reset = env_config.get("rand_reset", "random")
-        self._num_disc_obs_steps = env_config["num_disc_obs_steps"]
-        self._disc_dof_vel_obs = env_config.get("disc_dof_vel_obs", True)
         self._tar_speed = float(env_config.get("tar_speed", 1.0))
         self._tar_change_time_min = float(env_config.get("tar_change_time_min", 5.0))
         self._tar_change_time_max = float(env_config.get("tar_change_time_max", 10.0))
@@ -59,6 +57,11 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
         self._vrhand_grabbed_targets = {"left": None, "right": None}
         # Double trigger while no nearby bone is locked: set/clear a distant facing point.
         self._vrhand_double_trigger_window = float(env_config.get("vrhand_double_trigger_window", 0.65))
+        # Analog trigger hysteresis: a shallow squeeze counts as a press.
+        self._vrhand_trigger_press_threshold = float(env_config.get("vrhand_trigger_press_threshold", 0.25))
+        self._vrhand_trigger_release_threshold = float(env_config.get("vrhand_trigger_release_threshold", 0.10))
+        if not (0.0 <= self._vrhand_trigger_release_threshold < self._vrhand_trigger_press_threshold <= 1.0):
+            raise ValueError("VR trigger thresholds must satisfy 0 <= release < press <= 1")
         self._vrhand_ground_point_threshold = float(env_config.get("vrhand_ground_point_threshold", -0.65))
         self._vrhand_remote_player_distance = float(env_config.get("vrhand_remote_player_distance", 5.0))
         self._vrhand_trigger_pressed = {"left": False, "right": False}
@@ -78,7 +81,7 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
         self._vrhand_delay_finished = False
         self._vrhand_asset = os.path.join("data", "assets", "objects", "vrhand_collision_box.xml")
         self._vrhmd_asset = os.path.join("data", "assets", "objects", "vrhmd_collision_box.xml")
-        # Player collision capsules: torso, left/right upper arms and forearms.
+        # Lightweight test: torso capsule only; retain HMD UDP tracking without HMD physics body.
         self._vrbody_enabled = self._vrhand_enabled and bool(env_config.get("vrbody_enabled", True))
         self._vrbody_shoulder_width = float(env_config.get("vrbody_shoulder_width", 0.25))
         self._vrbody_upper_arm_length = float(env_config.get("vrbody_upper_arm_length", 0.25))
@@ -126,7 +129,7 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
         self._vrpd_debug = bool(env_config.get("vrpd_debug", False))
         self._vrpd_targets = {}
         self._vrpd_initialized = set()
-        self._vrpd_masses = {"left_hand": 2.0, "right_hand": 2.0, "left_forearm": 1.7, "right_forearm": 1.7, "left_upper_arm": 1.5, "right_upper_arm": 1.5}
+        self._vrpd_masses = {"left_hand": 5.0, "right_hand": 5.0, "left_forearm": 1.7, "right_forearm": 1.7, "left_upper_arm": 1.5, "right_upper_arm": 1.5}
         self._vrhand_left_pd_asset = os.path.join("data", "assets", "objects", "vrhand_left_pd_collision_box.xml")
         self._vrhand_right_pd_asset = os.path.join("data", "assets", "objects", "vrhand_right_pd_collision_box.xml")
         if self._vrhand_enabled:
@@ -134,7 +137,6 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
             if self._vrpd_enabled:
                 self._write_vrhand_left_pd_asset()
                 self._write_vrhand_right_pd_asset()
-            self._write_vrhmd_asset()
             if self._vrbody_enabled:
                 self._write_vrbody_assets()
             
@@ -149,6 +151,31 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
         self._vam_enabled = env_config.get("vam_udp_enabled", visualize)
         self._vam_ip = env_config.get("vam_udp_ip", "192.168.2.100")
         self._vam_port = int(env_config.get("vam_udp_port", 9998))
+        # Test-only: select rotation mapping for foot/shin/thigh on both sides.
+        self._vam_leg_rotation_mode = str(env_config.get("vam_leg_rotation_mode", "legacy")).strip().lower()
+        if self._vam_leg_rotation_mode not in ("legacy", "matrix", "matrix_xz_pos", "matrix_xz_neg"):
+            raise ValueError("vam_leg_rotation_mode must be one of: legacy, matrix, matrix_xz_pos, matrix_xz_neg")
+        if self._vam_enabled:
+            print(f"[VaM UDP] leg rotation mode: {self._vam_leg_rotation_mode}", flush=True)
+        # Test switch for all 12 limb rotations. Torso/pelvis/head always legacy.
+        self._vam_limb_rotation_mode = str(env_config.get("vam_limb_rotation_mode", "legacy")).strip().lower()
+        if self._vam_limb_rotation_mode not in ("legacy", "matrix_bind"):
+            raise ValueError("vam_limb_rotation_mode must be legacy or matrix_bind")
+        self._vam_limb_bind_euler_deg = env_config.get("vam_limb_bind_euler_deg", {}) or {}
+        self._vam_limb_bind_quat_xyzw = env_config.get("vam_limb_bind_quat_xyzw", {}) or {}
+        if not isinstance(self._vam_limb_bind_euler_deg, dict) or not isinstance(self._vam_limb_bind_quat_xyzw, dict):
+            raise ValueError("vam_limb_bind_euler_deg and vam_limb_bind_quat_xyzw must be mappings")
+        valid_limb_keys = self._vam_limb_parts
+        for key, angles in self._vam_limb_bind_euler_deg.items():
+            if key not in valid_limb_keys or len(angles) != 3 or not np.all(np.isfinite(np.asarray(angles, dtype=float))):
+                raise ValueError("Invalid vam_limb_bind_euler_deg entry: " + str(key))
+        for key, quat in self._vam_limb_bind_quat_xyzw.items():
+            if key not in valid_limb_keys or len(quat) != 4 or not np.all(np.isfinite(np.asarray(quat, dtype=float))) or np.linalg.norm(quat) < 1e-8:
+                raise ValueError("Invalid vam_limb_bind_quat_xyzw entry: " + str(key))
+        if self._vam_enabled:
+            print(f"[VaM UDP] limb rotation mode: {self._vam_limb_rotation_mode} "
+                  f"(bind euler={len(self._vam_limb_bind_euler_deg)}, "
+                  f"bind quat={len(self._vam_limb_bind_quat_xyzw)})", flush=True)
         self._vam_packet = struct.Struct("<133f")
         self._vam_position_offset = np.asarray(env_config.get("vam_position_offset", [0.0, 0.06, 0.0]), dtype=np.float32)
         self._vam_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if self._vam_enabled else None
@@ -172,14 +199,9 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
                 asset_file=self._vrhand_right_pd_asset if self._vrpd_enabled else self._vrhand_asset, name="vrhand_right_collision_box",
                 is_visual=False, fix_root=False, color=[1.0, 0.4, 0.2] # False に変更
             )
-            hmd_id = self._engine.create_obj(
-                env_id=env_id, obj_type=engine.ObjType.rigid,
-                asset_file=self._vrhmd_asset, name="vrhmd_collision_box",
-                is_visual=False, fix_root=False, color=[0.3, 0.8, 0.8] # False に変更
-            )
             if self._vrbody_enabled:
                 body_ids = []
-                for name in ("torso", "left_forearm", "right_forearm", "left_upper_arm", "right_upper_arm"):
+                for name in ("torso",):
                     body_ids.append(self._engine.create_obj(
                         env_id=env_id, obj_type=engine.ObjType.rigid,
                         asset_file=self._vrbody_asset_files[name], name="vrbody_" + name,
@@ -190,18 +212,18 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
                 else:
                     assert self._vrbody_box_ids == body_ids
             if env_id == 0:
-                self._vrhand_box_ids = [left_id, right_id, hmd_id]
+                self._vrhand_box_ids = [left_id, right_id]
                 if self._vrhand_debug:
-                    print(f"[VRhand] collision boxes created: left_id={left_id}, right_id={right_id}, hmd_id={hmd_id} env_id={env_id}, asset={self._vrhand_asset}", flush=True)
+                    print(f"[VRhand] collision boxes created: left_id={left_id}, right_id={right_id}, hmd=tracking_only env_id={env_id}, asset={self._vrhand_asset}", flush=True)
             else:
-                assert self._vrhand_box_ids == [left_id, right_id, hmd_id]
+                assert self._vrhand_box_ids == [left_id, right_id]
         return
 
     def _build_sim_tensors(self, config):
         super()._build_sim_tensors(config)
         self._envbox_park_all()
         
-        if self._vrhand_enabled and len(self._vrhand_box_ids) == 3:
+        if self._vrhand_enabled and len(self._vrhand_box_ids) == 2:
             num_envs = self.get_num_envs()
             env_ids = torch.arange(num_envs, device=self._device, dtype=torch.long)
             
@@ -217,29 +239,16 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
             right_parked_pos[:, 1] = -1.0
             right_parked_pos[:, 2] = 10.0
             
-            hmd_parked_pos = torch.zeros((num_envs, 3), device=self._device, dtype=torch.float32)
-            hmd_parked_pos[:, 0] = 2.0
-            hmd_parked_pos[:, 1] = 0.0
-            hmd_parked_pos[:, 2] = 10.0
-            
-            # それぞれ別の座標に配置
-            left_id, right_id, hmd_id = self._vrhand_box_ids[0], self._vrhand_box_ids[1], self._vrhand_box_ids[2]
-            
+            # Only left and right hand rigid bodies exist. HMD is tracking-only.
+            left_id, right_id = self._vrhand_box_ids
             self._engine.set_root_pos(env_ids, left_id, left_parked_pos)
             self._engine.set_root_vel(env_ids, left_id, 0.0)
             self._engine.set_root_ang_vel(env_ids, left_id, 0.0)
-            
             self._engine.set_root_pos(env_ids, right_id, right_parked_pos)
             self._engine.set_root_vel(env_ids, right_id, 0.0)
             self._engine.set_root_ang_vel(env_ids, right_id, 0.0)
-            
-            self._engine.set_root_pos(env_ids, hmd_id, hmd_parked_pos)
-            self._engine.set_root_vel(env_ids, hmd_id, 0.0)
-            self._engine.set_root_ang_vel(env_ids, hmd_id, 0.0)
-            
-            
-            
-            if self._vrbody_enabled and len(self._vrbody_box_ids) == 5:
+
+            if self._vrbody_enabled and len(self._vrbody_box_ids) == 1:
                 for index, obj_id in enumerate(self._vrbody_box_ids):
                     parked_pos = torch.zeros((num_envs, 3), device=self._device, dtype=torch.float32)
                     parked_pos[:, 0] = 4.0 + index
@@ -262,158 +271,9 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
         self._prev_root_pos[:] = self._engine.get_root_pos(char_id)
         return
 
-    def _compute_obs(self, env_ids=None):
-        # ベースとなる環境の観測を取得
-        obs = super()._compute_obs(env_ids)
-
-        return obs
-
-    def get_disc_obs_space(self):
-        disc_obs = self.fetch_disc_obs_demo(1)
-        disc_obs_shape = list(disc_obs.shape[1:])
-        disc_obs_dtype = torch_util.torch_dtype_to_numpy(disc_obs.dtype)
-        disc_obs_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
-            shape=disc_obs_shape,
-            dtype=disc_obs_dtype,
-        )
-        return disc_obs_space
-
-    def get_num_disc_obs_steps(self):
-        return self._num_disc_obs_steps
-
-    def fetch_disc_obs_demo(self, num_samples):
-        motion_ids, motion_times0 = self._sample_motion_times(num_samples)
-        disc_obs = self._compute_disc_obs_demo(motion_ids, motion_times0)
-        return disc_obs
-
-    def _compute_disc_obs_demo(self, motion_ids, motion_times0):
-        root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, body_pos = self._fetch_disc_demo_data(motion_ids, motion_times0)
-        
-        if (self._track_global_root()):
-            ref_root_pos = torch.zeros_like(root_pos[..., -1, :])
-            ref_root_rot = torch.zeros_like(root_rot[..., -1, :])
-            ref_root_rot[..., -1] = 1
-        else:
-            ref_root_pos = root_pos[..., -1, :]
-            ref_root_rot = root_rot[..., -1, :]
-            
-        if (self._has_key_bodies()):
-            key_pos = body_pos[..., self._key_body_ids, :]
-        else:
-            key_pos = torch.zeros([0], device=self._device)
-        
-        disc_obs = compute_disc_obs(ref_root_pos=ref_root_pos,
-                                  ref_root_rot=ref_root_rot,
-                                  root_pos=root_pos,
-                                  root_rot=root_rot, 
-                                  root_vel=root_vel,
-                                  root_ang_vel=root_ang_vel,
-                                  joint_rot=joint_rot,
-                                  dof_vel=dof_vel,
-                                  key_pos=key_pos,
-                                  global_obs=self._global_obs,
-                                  root_height_obs=self._root_height_obs,
-                                  dof_vel_obs=self._disc_dof_vel_obs)
-        return disc_obs
-
-    def _fetch_disc_demo_data(self, motion_ids, motion_times0):
-        num_samples = motion_ids.shape[0]
-
-        motion_ids = torch.tile(motion_ids.unsqueeze(-1), [1, self._num_disc_obs_steps])
-        motion_times = motion_times0.unsqueeze(-1)
-        time_steps = -self._engine.get_timestep() * torch.arange(0, self._num_disc_obs_steps, device=self._device)
-        time_steps = torch.flip(time_steps, dims=[0])
-        motion_times = motion_times + time_steps
-
-        motion_ids = motion_ids.view(-1)
-        motion_times = motion_times.view(-1)
-        root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel = self._motion_lib.calc_motion_frame(motion_ids, motion_times)
-        
-        body_pos, _ = self._kin_char_model.forward_kinematics(root_pos, root_rot, joint_rot)
-
-        root_pos = torch.reshape(root_pos, shape=[num_samples, self._num_disc_obs_steps, root_pos.shape[-1]])
-        root_rot = torch.reshape(root_rot, shape=[num_samples, self._num_disc_obs_steps, root_rot.shape[-1]])
-        root_vel = torch.reshape(root_vel, shape=[num_samples, self._num_disc_obs_steps, root_vel.shape[-1]])
-        root_ang_vel = torch.reshape(root_ang_vel, shape=[num_samples, self._num_disc_obs_steps, root_ang_vel.shape[-1]])
-        joint_rot = torch.reshape(joint_rot, shape=[num_samples, self._num_disc_obs_steps, joint_rot.shape[-2], joint_rot.shape[-1]])
-        dof_vel = torch.reshape(dof_vel, shape=[num_samples, self._num_disc_obs_steps, dof_vel.shape[-1]])
-        body_pos = torch.reshape(body_pos, shape=[num_samples, self._num_disc_obs_steps, body_pos.shape[-2], body_pos.shape[-1]])
-        
-        return root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, body_pos
-
-    def _build_data_buffers(self):
-        super()._build_data_buffers()
-        self._build_disc_obs_buffers()
-        self._info["disc_obs"] = self._disc_obs_buf
-        return
-
-    def _build_disc_obs_buffers(self):
-        num_envs = self.get_num_envs()
-        n = self._num_disc_obs_steps
-        
-        char_id = self._get_char_id()
-        root_pos = self._engine.get_root_pos(char_id)
-        root_rot = self._engine.get_root_rot(char_id)
-        root_vel = self._engine.get_root_vel(char_id)
-        root_ang_vel = self._engine.get_root_ang_vel(char_id)
-        dof_pos = self._engine.get_dof_pos(char_id)
-        dof_vel = self._engine.get_dof_vel(char_id)
-        body_pos = self._engine.get_body_pos(char_id)
-        
-        joint_rot = self._kin_char_model.dof_to_rot(dof_pos)
-
-        self._disc_hist_root_pos = circular_buffer.CircularBuffer(batch_size=num_envs,
-                                                                 buffer_len=n, 
-                                                                 shape=root_pos.shape[1:],
-                                                                 dtype=root_pos.dtype,
-                                                                 device=self._device)
-
-        self._disc_hist_root_rot = circular_buffer.CircularBuffer(batch_size=num_envs,
-                                                                 buffer_len=n,
-                                                                 shape=root_rot.shape[1:],
-                                                                 dtype=root_rot.dtype,
-                                                                 device=self._device)
-
-        self._disc_hist_root_vel = circular_buffer.CircularBuffer(batch_size=num_envs,
-                                                                 buffer_len=n,
-                                                                 shape=root_vel.shape[1:],
-                                                                 dtype=root_vel.dtype,
-                                                                 device=self._device)
-        
-        self._disc_hist_root_ang_vel = circular_buffer.CircularBuffer(batch_size=num_envs,
-                                                                     buffer_len=n,
-                                                                     shape=root_ang_vel.shape[1:],
-                                                                     dtype=root_ang_vel.dtype,
-                                                                     device=self._device)
-        
-        self._disc_hist_joint_rot = circular_buffer.CircularBuffer(batch_size=num_envs,
-                                                                  buffer_len=n,
-                                                                  shape=joint_rot.shape[1:],
-                                                                  dtype=joint_rot.dtype,
-                                                                  device=self._device)
-
-        self._disc_hist_dof_vel = circular_buffer.CircularBuffer(batch_size=num_envs,
-                                                                buffer_len=n,
-                                                                shape=dof_vel.shape[1:],
-                                                                dtype=dof_vel.dtype,
-                                                                device=self._device)
-        
-        self._disc_hist_body_pos = circular_buffer.CircularBuffer(batch_size=num_envs,
-                                                                 buffer_len=n,
-                                                                 shape=body_pos.shape[1:],
-                                                                 dtype=body_pos.dtype,
-                                                                 device=self._device)
-
-        disc_obs_space = self.get_disc_obs_space()
-        disc_obs_dtype = torch_util.numpy_dtype_to_torch(disc_obs_space.dtype)
-        self._disc_obs_buf = torch.zeros([num_envs] + list(disc_obs_space.shape), device=self._device, dtype=disc_obs_dtype)
-        return
 
     def _update_misc(self):
         super()._update_misc()
-        self._update_disc_hist()
         self._update_task()
         self._send_vam_udp()
         self._update_vrhand_boxes()
@@ -424,113 +284,16 @@ class AMPEnv(VRAssetsMixin, VRBodyMixin, VRPhysicsMixin, VRTrackingMixin, VaMUDP
 
         return
 
-    def _update_disc_hist(self):
-        char_id = self._get_char_id()
-        root_pos = self._engine.get_root_pos(char_id)
-        root_rot = self._engine.get_root_rot(char_id)
-        root_vel = self._engine.get_root_vel(char_id)
-        root_ang_vel = self._engine.get_root_ang_vel(char_id)
-        dof_pos = self._engine.get_dof_pos(char_id)
-        dof_vel = self._engine.get_dof_vel(char_id)
-        body_pos = self._engine.get_body_pos(char_id)
-
-        self._disc_hist_root_pos.push(root_pos)
-        self._disc_hist_root_rot.push(root_rot)
-        self._disc_hist_root_vel.push(root_vel)
-        self._disc_hist_root_ang_vel.push(root_ang_vel)
-        self._disc_hist_dof_vel.push(dof_vel)
-        self._disc_hist_body_pos.push(body_pos)
-        
-        joint_rot = self._kin_char_model.dof_to_rot(dof_pos)
-        self._disc_hist_joint_rot.push(joint_rot)
-        return
 
     def _update_ref_motion(self):
         if (self._enable_ref_char()):
             super()._update_ref_motion()
         return
 
-    def _update_observations(self, env_ids=None):
-        super()._update_observations(env_ids)
-
-        if (env_ids is None or len(env_ids) > 0):
-            self._update_disc_obs(env_ids)
-        return
-
-    def _update_disc_obs(self, env_ids=None):
-        root_pos = self._disc_hist_root_pos.get_all()
-        root_rot = self._disc_hist_root_rot.get_all()
-        root_vel = self._disc_hist_root_vel.get_all()
-        root_ang_vel = self._disc_hist_root_ang_vel.get_all()
-        joint_rot = self._disc_hist_joint_rot.get_all()
-        dof_vel = self._disc_hist_dof_vel.get_all()
-        body_pos = self._disc_hist_body_pos.get_all()
-        
-        if (env_ids is not None):
-            root_pos = root_pos[env_ids]
-            root_rot = root_rot[env_ids]
-            root_vel = root_vel[env_ids]
-            root_ang_vel = root_ang_vel[env_ids]
-            joint_rot = joint_rot[env_ids]
-            dof_vel = dof_vel[env_ids]
-            body_pos = body_pos[env_ids]
-        
-        if (self._track_global_root()):
-            ref_root_pos = torch.zeros_like(root_pos[..., -1, :])
-            ref_root_rot = torch.zeros_like(root_rot[..., -1, :])
-            ref_root_rot[..., -1] = 1
-        else:
-            ref_root_pos = root_pos[..., -1, :]
-            ref_root_rot = root_rot[..., -1, :]
-            
-        if (self._has_key_bodies()):
-            key_pos = body_pos[..., self._key_body_ids, :]
-        else:
-            key_pos = torch.zeros([0], device=self._device)
-
-        disc_obs = compute_disc_obs(ref_root_pos=ref_root_pos,
-                                  ref_root_rot=ref_root_rot,
-                                  root_pos=root_pos,
-                                  root_rot=root_rot, 
-                                  root_vel=root_vel,
-                                  root_ang_vel=root_ang_vel,
-                                  joint_rot=joint_rot,
-                                  dof_vel=dof_vel,
-                                  key_pos=key_pos,
-                                  global_obs=self._global_obs,
-                                  root_height_obs=self._root_height_obs,
-                                  dof_vel_obs=self._disc_dof_vel_obs)
-
-        if (env_ids is None):
-            self._disc_obs_buf[:] = disc_obs
-        else:
-            self._disc_obs_buf[env_ids] = disc_obs
-
-        return
 
     def _update_reward(self):
         return
 
-    def _reset_envs(self, env_ids):
-        super()._reset_envs(env_ids)
-        if len(env_ids) > 0:
-            self._reset_disc_hist(env_ids)
-            #self._reset_location_task(env_ids)
-        return
-
-    def _reset_disc_hist(self, env_ids):
-        motion_ids = self._motion_ids[env_ids]
-        motion_times0 = self._get_motion_times(env_ids)
-        root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, body_pos = self._fetch_disc_demo_data(motion_ids, motion_times0)
-        
-        self._disc_hist_root_pos.fill(env_ids, root_pos)
-        self._disc_hist_root_rot.fill(env_ids, root_rot)
-        self._disc_hist_root_vel.fill(env_ids, root_vel)
-        self._disc_hist_root_ang_vel.fill(env_ids, root_ang_vel)
-        self._disc_hist_joint_rot.fill(env_ids, joint_rot)
-        self._disc_hist_dof_vel.fill(env_ids, dof_vel)
-        self._disc_hist_body_pos.fill(env_ids, body_pos)
-        return
 
     def _reset_ref_motion(self, env_ids):
         n = len(env_ids)
@@ -616,61 +379,7 @@ import envs.task_location_env_vam as task_location_env
 AMPEnv = task_location_env.TaskLocationEnv
     
     
-@torch.jit.script
-def compute_disc_vel_obs(ref_root_rot, root_vel, root_ang_vel, dof_vel, global_obs, dof_vel_obs):
-    # type: (Tensor, Tensor, Tensor, Tensor, bool, bool) -> Tensor
 
-    if (not global_obs):
-        heading_inv_rot = torch_util.calc_heading_quat_inv(ref_root_rot)
-        heading_inv_rot_expand = heading_inv_rot.unsqueeze(-2)
-        heading_inv_rot_expand = heading_inv_rot_expand.repeat((1, root_vel.shape[1], 1))
-        heading_inv_rot_flat = heading_inv_rot_expand.reshape((heading_inv_rot_expand.shape[0] * heading_inv_rot_expand.shape[1], 
-                                                               heading_inv_rot_expand.shape[2]))
-        
-        root_vel_obs_flat = torch.reshape(root_vel, [root_vel.shape[0] * root_vel.shape[1], root_vel.shape[2]])
-        root_vel_obs_flat = torch_util.quat_rotate(heading_inv_rot_flat, root_vel_obs_flat)
-        root_vel_obs = torch.reshape(root_vel_obs_flat, root_vel.shape)
-        
-        root_ang_vel_obs_flat = torch.reshape(root_ang_vel, [root_ang_vel.shape[0] * root_ang_vel.shape[1], root_ang_vel.shape[2]])
-        root_ang_vel_obs_flat = torch_util.quat_rotate(heading_inv_rot_flat, root_ang_vel_obs_flat)
-        root_ang_vel_obs = torch.reshape(root_ang_vel_obs_flat, root_ang_vel.shape)
-    else:
-        root_vel_obs = root_vel
-        root_ang_vel_obs = root_ang_vel
-
-    obs = [root_vel_obs, root_ang_vel_obs]
-
-    if (dof_vel_obs):
-        obs = obs + [dof_vel]
-
-    obs = torch.cat(obs, dim=-1)
-
-    return obs
-
-@torch.jit.script
-def compute_disc_obs(ref_root_pos, ref_root_rot, root_pos, root_rot, root_vel, root_ang_vel, joint_rot, dof_vel, key_pos, global_obs, root_height_obs, dof_vel_obs):
-    # type: (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, bool, bool, bool) -> Tensor
-
-    pos_obs = deepmimic_env.compute_tar_obs(ref_root_pos=ref_root_pos, 
-                                               ref_root_rot=ref_root_rot, 
-                                               root_pos=root_pos, 
-                                               root_rot=root_rot, 
-                                               joint_rot=joint_rot, 
-                                               key_pos=key_pos,
-                                               global_obs=global_obs, 
-                                               root_height_obs=root_height_obs)
-
-    vel_obs = compute_disc_vel_obs(ref_root_rot=ref_root_rot, 
-                                  root_vel=root_vel, 
-                                  root_ang_vel=root_ang_vel, 
-                                  dof_vel=dof_vel,
-                                  global_obs=global_obs,
-                                  dof_vel_obs=dof_vel_obs)
-
-    disc_obs = torch.cat([pos_obs, vel_obs], dim=-1)
-    disc_obs = torch.reshape(disc_obs, [disc_obs.shape[0], -1])
-
-    return disc_obs
     
     
 

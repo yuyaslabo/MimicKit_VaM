@@ -1,4 +1,4 @@
-agent_name: "AMP"
+agent_name: "Inference"
 
 model:
   actor_net: "fc_2layers_1024units"

@@ -51,6 +51,7 @@ class BaseAgent(torch.nn.Module):
 
     def train_model(self, max_samples, out_dir, save_int_models, logger_type):
         start_time = time.time()
+        save_int_models = True
 
         out_model_file = os.path.join(out_dir, "model.pt")
         log_file = os.path.join(out_dir, "log.txt")
@@ -364,7 +365,7 @@ class BaseAgent(torch.nn.Module):
         test_eps = mp_util.reduce_sum(test_eps)
 
         self._logger.log("Test_Return", test_return, collection="0_Main")
-        self._logger.log("Test_Episode_Length", test_ep_len, collection="0_Main", quiet=True)
+        self._logger.log("Test_Episode_Length", test_ep_len, collection="0_Main")
         self._logger.log("Test_Episodes", test_eps, collection="1_Info", quiet=True)
 
         train_return = train_info.pop("mean_return")
@@ -373,7 +374,7 @@ class BaseAgent(torch.nn.Module):
         train_eps = mp_util.reduce_sum(train_eps)
 
         self._logger.log("Train_Return", train_return, collection="0_Main")
-        self._logger.log("Train_Episode_Length", train_ep_len, collection="0_Main", quiet=True)
+        self._logger.log("Train_Episode_Length", train_ep_len, collection="0_Main")
         self._logger.log("Train_Episodes", train_eps, collection="1_Info", quiet=True)
 
         for k, v in train_info.items():

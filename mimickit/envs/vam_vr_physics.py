@@ -9,14 +9,14 @@ import torch
 
 class VRPhysicsMixin:
     def _vrpd_target(self, name, obj_id, pos, quat, env_ids):
-        target_pos = np.asarray(pos, dtype=np.float64).reshape(3)
-        target_quat = np.asarray(quat, dtype=np.float64).reshape(4)
-        if not np.isfinite(target_pos).all() or not np.isfinite(target_quat).all():
+        # Hand PD only. Arm capsules are updated kinematically by VRBodyMixin.
+        if name not in ("left_hand", "right_hand"):
             return
-        self._vrpd_targets[name] = (obj_id, target_pos.copy())
+        p = torch.as_tensor(pos, dtype=torch.float32, device=self._device).reshape(1, 3)
+        q = torch.as_tensor(quat, dtype=torch.float32, device=self._device).reshape(4)
+        # VaM UDP inputs were validated before entering this function.
+        self._vrpd_targets[name] = (obj_id, p)
         if name not in self._vrpd_initialized:
-            p = torch.as_tensor(target_pos, device=self._device, dtype=torch.float32).reshape(1, 3)
-            q = torch.as_tensor(target_quat, device=self._device, dtype=torch.float32)
             self._engine.set_root_pos(env_ids, obj_id, p)
             self._engine.set_root_rot(env_ids, obj_id, q)
             self._engine.set_root_vel(env_ids, obj_id, 0.0)
@@ -28,40 +28,30 @@ class VRPhysicsMixin:
     def _vrpd_apply_forces(self, env_ids):
         if not self._vrpd_enabled or not callable(getattr(self._engine, "set_body_forces", None)):
             return
-        for name in ("left_hand", "right_hand", "left_forearm", "right_forearm", "left_upper_arm", "right_upper_arm"):
+        # Keep all PD operations on the Newton tensor device; no per-step .cpu()/.item().
+        for name in ("left_hand", "right_hand"):
             if name not in self._vrpd_initialized or name not in self._vrpd_targets:
                 continue
             obj_id, target = self._vrpd_targets[name]
-            current = self._engine.get_root_pos(obj_id)
-            velocity = self._engine.get_root_vel(obj_id)
-            pos = np.asarray(self._vam_to_numpy(current), dtype=np.float64).reshape(-1, 3)[0]
-            vel = np.asarray(self._vam_to_numpy(velocity), dtype=np.float64).reshape(-1, 3)[0]
-            if not np.isfinite(pos).all() or not np.isfinite(vel).all():
-                continue
+            pos = self._engine.get_root_pos(obj_id).reshape(-1, 3)[:1]
+            vel = self._engine.get_root_vel(obj_id).reshape(-1, 3)[:1]
             error = target - pos
-            err_norm = float(np.linalg.norm(error))
-            if err_norm > self._vrpd_max_error > 0.0:
-                error *= self._vrpd_max_error / err_norm
-            # Clamp only the PD correction: gravity compensation must not be clipped away.
-            upper_arm = name.endswith("_upper_arm")
-            kp = self._vrpd_upper_arm_kp if upper_arm else self._vrpd_position_kp
-            kd = self._vrpd_upper_arm_kd if upper_arm else self._vrpd_position_kd
-            max_force = self._vrpd_upper_arm_max_force if upper_arm else self._vrpd_max_force
-            correction = kp * error - kd * vel
-            norm = float(np.linalg.norm(correction))
-            raw_force_norm = norm
-            if norm > max_force > 0.0:
-                correction *= max_force / norm
+            if self._vrpd_max_error > 0.0:
+                error = error * (self._vrpd_max_error / torch.linalg.vector_norm(error, dim=-1, keepdim=True).clamp_min(self._vrpd_max_error)).clamp(max=1.0)
+            correction = self._vrpd_position_kp * error - self._vrpd_position_kd * vel
+            if self._vrpd_max_force > 0.0:
+                correction = correction * (self._vrpd_max_force / torch.linalg.vector_norm(correction, dim=-1, keepdim=True).clamp_min(self._vrpd_max_force)).clamp(max=1.0)
             force = correction
             if self._vrpd_gravity_comp:
-                force[2] += 9.81 * self._vrpd_masses[name]
-            if not np.isfinite(force).all():
-                continue
-            force_tensor = torch.as_tensor(force, device=self._device, dtype=torch.float32).reshape(1, 3)
-            self._engine.set_body_forces(env_ids, obj_id, 0, force_tensor)
+                gravity = torch.tensor([[0.0, 0.0, 9.81 * self._vrpd_masses[name]]], device=self._device, dtype=force.dtype)
+                force = force + gravity
+            # Invalid tracking data is already filtered on UDP reception.
+            force = torch.where(torch.isfinite(force), force, torch.zeros_like(force))
+            self._engine.set_body_forces(env_ids, obj_id, 0, force)
             self._has_body_forces = True
             if self._vrpd_debug and self._vrhand_update_count % 30 == 0:
-                print(f"[VRPD] {name} error={err_norm:.3f}m rawPD={raw_force_norm:.1f}N applied={np.linalg.norm(force):.1f}N vel={np.linalg.norm(vel):.2f}m/s", flush=True)
+                # Diagnostics intentionally synchronize; leave disabled for FPS testing.
+                print(f"[VRPD] {name} error={torch.linalg.vector_norm(error).item():.3f}m applied={torch.linalg.vector_norm(force).item():.1f}N", flush=True)
 
     def _vrhand_double_trigger_action(self, hand_name, hand_pos):
         """Right double-trigger: set/reset facing; left: toggle target freeze."""
@@ -99,30 +89,24 @@ class VRPhysicsMixin:
         quat_vam = np.asarray(packet[11:15], dtype=np.float64)
         if not np.isfinite(quat_vam).all() or np.linalg.norm(quat_vam) < 1e-8:
             return
-        raw = torch.as_tensor(self._vam_quat_to_engine(quat_vam),
-                              device=self._device, dtype=torch.float32)
-        q_hand = torch.stack((raw[1], -raw[0], raw[2], raw[3]))
-        q_hand = q_hand / torch.linalg.vector_norm(q_hand).clamp_min(1e-8)
-        local_axis = torch.tensor([1.0, 0.0, 0.0],
-                                  device=self._device, dtype=torch.float32)
+        raw = self._vam_quat_to_engine(quat_vam).astype(np.float64)
+        q_hand = np.array([raw[1], -raw[0], raw[2], raw[3]], dtype=np.float64)
+        q_hand /= max(np.linalg.norm(q_hand), 1e-8)
         v = q_hand[:3]
+        local_axis = np.array([1.0, 0.0, 0.0], dtype=np.float64)
         world_dir = local_axis + 2.0 * (
-            q_hand[3] * torch.cross(v, local_axis, dim=0)
-            + torch.cross(v, torch.cross(v, local_axis, dim=0), dim=0)
-        )
-        world_dir = world_dir / torch.linalg.vector_norm(world_dir).clamp_min(1e-8)
-
-        if float(world_dir[2]) <= self._vrhand_ground_point_threshold:
+            q_hand[3] * np.cross(v, local_axis) + np.cross(v, np.cross(v, local_axis)))
+        world_dir /= max(np.linalg.norm(world_dir), 1e-8)
+        if world_dir[2] <= self._vrhand_ground_point_threshold:
             self._vrhand_remote_player_world_pos = None
             if self._vrhand_debug:
                 print("[VRhand] right downward double trigger: facing point reset to HMD", flush=True)
             return
-
         xy = world_dir[:2]
-        xy_length = float(torch.linalg.vector_norm(xy))
+        xy_length = np.linalg.norm(xy)
         if xy_length < 0.10:
             return
-        world_xy = xy / xy_length
+        world_xy = torch.as_tensor(xy / xy_length, device=self._device, dtype=torch.float32)
         hmd_pos = self._latest_hmd_pos.reshape(-1, 3)[0]
         # Store the absolute world-space point once. Subsequent HMD movement
         # and yaw rotation must not affect the chosen facing point.
@@ -133,14 +117,8 @@ class VRPhysicsMixin:
             print(f"[VRhand] right double trigger: WORLD facing point XYZ=({float(world_pos[0]):.2f}, {float(world_pos[1]):.2f}, {float(world_pos[2]):.2f})", flush=True)
 
     def _apply_vrhand_drag(self, env_ids, tracked=None):
-        """Nearby bone grabbing and double-trigger facing-point selection."""
-        char_id = self._get_char_id()
-        body_pos_tensor = self._engine.get_body_pos(char_id)
-        body_vel_tensor = self._engine.get_body_vel(char_id)
-        body_pos = body_pos_tensor[0] if body_pos_tensor.ndim == 3 else body_pos_tensor
-        body_vel = body_vel_tensor[0] if body_vel_tensor.ndim == 3 else body_vel_tensor
-
-        # Preserve existing buffer clearing semantics; VRPD forces follow this call.
+        """Preserve double-trigger and grab semantics with lazy tensor reads."""
+        # This buffer must still be cleared before both drag and hand PD forces.
         self._has_body_forces = False
         if hasattr(self._sim_state, '_wp_body_force'):
             if hasattr(self._sim_state._wp_body_force, "zero_"):
@@ -148,31 +126,42 @@ class VRPhysicsMixin:
             elif isinstance(self._sim_state._wp_body_force, np.ndarray):
                 self._sim_state._wp_body_force.fill(0.0)
 
-        for hand_name, hand_id, packet_offset in (("left", self._vrhand_box_ids[0], 0), ("right", self._vrhand_box_ids[1], 8)):
+        # Hysteresis lets partial pulls count, while requiring a genuine release
+        # before the next press edge. Keep existing drag-force scaling unchanged.
+        press_threshold = self._vrhand_trigger_press_threshold
+        release_threshold = self._vrhand_trigger_release_threshold
+        for name in ("left", "right"):
+            if self._vrhand_triggers[name] <= release_threshold:
+                self._vrhand_grabbed_targets[name] = None
+                self._vrhand_trigger_pressed[name] = False
+
+        active = [(name, hand_id, offset) for name, hand_id, offset in (
+            ("left", self._vrhand_box_ids[0], 0),
+            ("right", self._vrhand_box_ids[1], 8),
+        ) if self._vrhand_triggers[name] >= press_threshold or self._vrhand_trigger_pressed[name]]
+        if not active:
+            return
+
+        char_id = self._get_char_id()
+        body_pos = None
+        body_vel = None
+        for hand_name, hand_id, packet_offset in active:
             trigger_val = self._vrhand_triggers[hand_name]
-            hand_pos = self._engine.get_root_pos(hand_id)
-            if hand_pos.ndim > 1:
-                hand_pos = hand_pos[0]
-            # Use tracking coordinates for gesture direction, not the PD-delayed collider.
+            if trigger_val < press_threshold and not self._vrhand_trigger_pressed[hand_name]:
+                continue
+            hand_pos = self._engine.get_root_pos(hand_id).reshape(-1, 3)[0]
             pointing_pos = hand_pos
             if tracked is not None and packet_offset in tracked:
                 pointing_pos = torch.as_tensor(tracked[packet_offset][0], device=self._device, dtype=hand_pos.dtype)
-
-            if trigger_val < 0.3:
-                self._vrhand_grabbed_targets[hand_name] = None
-                self._vrhand_trigger_pressed[hand_name] = False
-                continue
-            if trigger_val < 0.5:
-                continue
-
             rising = not self._vrhand_trigger_pressed[hand_name]
             if rising:
                 self._vrhand_trigger_pressed[hand_name] = True
-
-            # Search only on an initial press; never fall back to remote grabbing.
             if rising and self._vrhand_grabbed_targets[hand_name] is None:
+                if body_pos is None:
+                    body_pos_tensor = self._engine.get_body_pos(char_id)
+                    body_pos = body_pos_tensor[0] if body_pos_tensor.ndim == 3 else body_pos_tensor
                 distances = torch.linalg.vector_norm(body_pos - hand_pos, dim=-1)
-                closest_idx = int(torch.argmin(distances).item())
+                closest_idx = int(torch.argmin(distances).item())  # only once per trigger press
                 if float(distances[closest_idx]) < 0.2:
                     self._vrhand_grabbed_targets[hand_name] = closest_idx
                     self._vrhand_last_unlocked_press[hand_name] = None
@@ -186,21 +175,19 @@ class VRPhysicsMixin:
                         self._vrhand_double_trigger_action(hand_name, pointing_pos)
                     else:
                         self._vrhand_last_unlocked_press[hand_name] = now
-
             target_bone_idx = self._vrhand_grabbed_targets[hand_name]
             if target_bone_idx is None:
                 continue
-            bone_pos = body_pos[target_bone_idx]
-            bone_vel = body_vel[target_bone_idx]
-            clamped_trigger = max(0.3, min(1.0, trigger_val))
-            scaled_trigger = (clamped_trigger - 0.3) / (1.0 - 0.3)
-            kp_force = 250.0
-            kd_force = 15.0
-            pull_force = (kp_force * (hand_pos - bone_pos) - kd_force * bone_vel) * scaled_trigger
-            force_speed = torch.norm(pull_force)
-            max_grab_force = 500.0
-            if force_speed > max_grab_force:
-                pull_force = (pull_force / force_speed) * max_grab_force
+            if body_pos is None:
+                body_pos_tensor = self._engine.get_body_pos(char_id)
+                body_pos = body_pos_tensor[0] if body_pos_tensor.ndim == 3 else body_pos_tensor
+            if body_vel is None:
+                body_vel_tensor = self._engine.get_body_vel(char_id)
+                body_vel = body_vel_tensor[0] if body_vel_tensor.ndim == 3 else body_vel_tensor
+            scaled_trigger = (max(0.3, min(1.0, trigger_val)) - 0.3) / 0.7
+            pull_force = (250.0 * (hand_pos - body_pos[target_bone_idx]) - 15.0 * body_vel[target_bone_idx]) * scaled_trigger
+            force_norm = torch.linalg.vector_norm(pull_force).clamp_min(500.0)
+            pull_force = pull_force * (500.0 / force_norm)
             if hasattr(self._engine, "set_body_forces"):
                 self._engine.set_body_forces(env_ids, char_id, target_bone_idx, pull_force.reshape(1, 3))
         return
