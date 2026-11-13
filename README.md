@@ -88,9 +88,10 @@ Use a **double trigger press (×2)** on the corresponding VR controller. Perform
 1. **Git:** Install from [git-scm.com](https://git-scm.com).
 2. **Miniconda / Anaconda:** Install from [anaconda.com](https://anaconda.com).
 
+
 ### Installation & Execution
 
-Run the following commands in **Anaconda Prompt**:
+Run the following commands in your **Anaconda Prompt**.
 
 1. **Clone the repository:**
 
@@ -99,34 +100,53 @@ Run the following commands in **Anaconda Prompt**:
    cd MimicKit_VaM
    ```
 
-2. **Create and activate the Python environment:**
+2. **Download the official MimicKit assets and motion data:**
+
+   After cloning this repository, visit the [official MimicKit installation instructions](https://github.com/xbpeng/MimicKit#installation).
+
+   In **Step 3**, follow the download link for the assets and motion data (`.zip` archive).
+
+   Extract the archive and place its contents inside the `data/` directory of this cloned repository.
+
+   Preserve the original directory structure so that the assets and motion files are available under `data/` (e.g., `data/motions/`).
+
+3. **Create and activate the Python environment:**
 
    ```bash
    conda create --name mimickit python=3.11 -y
    conda activate mimickit
    ```
 
-3. **Install Newton Simulator Backend (v1.0.0):**
+4. **Install Newton Simulator Backend (v1.0.0):**
 
    ```bash
    pip install newton==1.0.0
    ```
 
-4. **Install dependencies:**
+5. **Install dependencies:**
 
    ```bash
    pip install -r requirements.txt
    ```
 
-   > **Troubleshooting (`J_ki` Error):** Depending on your GPU architecture (e.g., RTX 3090), a `J_ki`-related Warp compilation error may occur. If you encounter this error, refer to the `patches/` folder and apply the fix to `solver.py` in your Conda environment before proceeding.
+   > **Troubleshooting (`J_ki` Error):** Depending on your GPU architecture (e.g., RTX 3090), a `J_ki`-related Warp compilation error may occur. If you encounter this error, please refer to the `patches/` folder and apply the fix to `solver.py` in your Conda environment before proceeding.
 
-5. **Run AI inference:**
+6. **Run AI Inference:**
 
    ```bash
    python mimickit/run.py --mode test --num_envs 1 --engine_config data/engines/newton_engine.yaml --env_config data/envs/amp_g1_vam_env.yaml --agent_config data/agents/amp_g1_vam_agent.yaml --visualize true --model_file checkpoint/model.pt
    ```
 
-6. **Set up Virt-A-Mate:** Load `MimickitReceiver.cs` as a **Person plugin** and `VRhand_Mimickit2.cs` as a **Scene plugin**. Load `Atom_sync_mimickit_public.cs` to enable furniture synchronization.
+7. **Virt-A-Mate Setup:**
+
+   Load the following plugins in Virt-A-Mate:
+
+   - `MimickitReceiver.cs` — **Person plugin** (receives AI bone motion via UDP 9998).
+   - `VRhand_Mimickit2.cs` — **Scene plugin** (sends VR controller and HMD tracking data via UDP 9999).
+   - `Atom_sync_mimickit_public.cs` — **Scene plugin** (sends furniture Atom positions, rotations, and collider shapes via UDP 9001/9002).
+
+   Configure the IP addresses and UDP ports in the plugin UI according to your single-PC or dual-PC setup.
+
 
 ---
 
