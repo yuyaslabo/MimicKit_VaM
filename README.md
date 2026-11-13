@@ -52,8 +52,6 @@ Virt-A-Mate (VaM)                          Newton / MimicKit
 - **UDP 9002:** Furniture Atom collider shape data, sent when the plugin starts and when new furniture Atoms are added to the scene.
 - **Position and rotation changes are synchronized**, but **scale changes are not synchronized**. If you change a furniture Atom's scale, you must **re-register its collider shape in Newton** and restart Newton to use the updated shape.
 
-Furniture is currently used for **obstacle detection and avoidance** by the AI character, rather than for picking up, pushing, or otherwise manipulating the furniture.
-
 ### Registering Furniture in Newton (First Use)
 
 Each new furniture object must be registered before use. Registration is automatic, but **Newton must be restarted after registration** before the collider is available for normal use.
