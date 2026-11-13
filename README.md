@@ -155,7 +155,10 @@ Run the following commands in your **Anaconda Prompt**.
    >
    > Incorrect position or rotation alignment can cause furniture locations in Newton to differ from their positions relative to the character in VaM.
 
-   Configure the IP addresses and UDP ports through the plugin UIs according to your single-PC or dual-PC setup.
+   **Network Configuration:**
+   - **Single-PC Setup:** The default IP addresses (`127.0.0.1`) and UDP ports should work without any changes, provided there are no port conflicts.
+   - **Dual-PC Setup:** Configure the IP addresses and UDP ports through the plugin UIs and Newton configuration file to match your local network environment.
+
 
 8. **Done!** Once Newton and VaM are running and synchronized, the AI character will start moving. You can interact with it using VR controllers or test Follow Mode in Desktop Mode.
 
