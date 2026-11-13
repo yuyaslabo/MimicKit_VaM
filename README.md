@@ -1,6 +1,6 @@
 # VaM_Physical_AI_from_Mimickit
 
-Run physical AI trained with MimicKit inside Virt-A-Mate (VaM). Interact with the AI via VR controllers (push and grab).
+Run physical AI trained with MimicKit inside Virt-A-Mate (VaM). Interact with the AI character using VR controllers (push and grab), control its following and facing behavior, and enable furniture obstacle avoidance.
 
 > 💡 **Fork Notice:** This repository is a fork of the official [MimicKit](https://github.com/xbpeng/MimicKit) framework, combining core motion imitation with custom environment files and plugins for real-time UDP inference in Virt-A-Mate.
 
@@ -12,10 +12,10 @@ Run physical AI trained with MimicKit inside Virt-A-Mate (VaM). Interact with th
 
 ## Overview
 
-This project runs AI inference via **Newton** in the background while Virt-A-Mate runs. **A pre-trained physical AI model is included for immediate use.**
+This project runs AI inference via **Newton** while Virt-A-Mate runs. **A pre-trained physical AI model is included for immediate use.** The AI character can follow the player, face a direction selected with a VR controller, and detect furniture as obstacles to avoid. **Furniture collision support is currently intended for obstacle detection and avoidance, not furniture manipulation.**
 
-- **Desktop Mode:** Runs on a single PC. You can test the AI's **follow feature** even without a VR headset, although VR-based physical interactions are unavailable.
-- **VR Mode:** Requires substantial computing power—typically a separate dedicated PC with an NVIDIA GPU for AI inference alongside the VaM PC. *(An RTX 4070 Ti single-PC setup proved insufficient during testing.)*
+- **Desktop Mode:** Runs on a single PC. You can test the AI's **follow feature** without a VR headset, although VR-based physical interactions are unavailable.
+- **VR Mode:** Requires substantial computing power—typically a separate PC with an NVIDIA GPU for AI inference alongside the VaM PC. *(An RTX 4070 Ti single-PC setup proved insufficient during testing.)*
   - **Development & Tested VR Setup (Dual-PC):**
     - **VaM PC:** NVIDIA RTX 4070 Ti / Intel Core i5-13600KF
     - **Newton AI Inference PC:** NVIDIA RTX 3090 / Intel Core i5-11400F
@@ -36,24 +36,27 @@ Virt-A-Mate (VaM)                          Newton / MimicKit
   Character bones      ◄─ UDP 9998 ─────── AI motion output
 ```
 
-- IP addresses and ports can be configured for single-PC or dual-PC setups.
-- **VaM side:** Configure VR hand outbound and character bone inbound settings from the plugin UI.
-- **Newton/MimicKit side:** Adjust UDP settings in `data/envs/amp_g1_vam_env.yaml` (including `vam_udp_ip`, `vam_udp_port`, and `vrhand_udp_port`).
+- IP addresses and ports can be configured for single-PC or dual-PC setups. For a single-PC setup, use `127.0.0.1` as the local IP address; for two PCs, configure the relevant LAN IP addresses.
+- **VaM side:** Configure VR hand tracking output, furniture synchronization, and character bone reception through the corresponding plugin UIs.
+- **Newton/MimicKit side:** Adjust the relevant UDP settings in `data/envs/amp_g1_vam_env.yaml` (including `vam_udp_ip`, `vam_udp_port`, and `vrhand_udp_port`).
 - **VaM plugins:**
   - `MimickitReceiver.cs` — **Person plugin** for receiving AI character motion.
   - `VRhand_Mimickit2.cs` — **Scene plugin** for VR controller/HMD data and controls.
-  - `Atom_sync_mimickit_public.cs` — furniture Atom transform and collider shape synchronization.
+  - `Atom_sync_mimickit_public.cs` — **Scene plugin** for furniture Atom transform and collider shape synchronization.
 
 ### Furniture Synchronization
 
 `Atom_sync_mimickit_public.cs` sends furniture Atom data from VaM to Newton:
 
-- **UDP 9001:** Furniture Atom position and rotation updates.
+- **UDP 9001:** Furniture Atom position and rotation updates during operation.
 - **UDP 9002:** Furniture Atom collider shape data, sent when the plugin starts and when new furniture Atoms are added to the scene.
+- **Position and rotation changes are synchronized**, but **scale changes are not synchronized**. If you change a furniture Atom's scale, you must **re-register its collider shape in Newton** and restart Newton to use the updated shape.
+
+Furniture is currently used for **obstacle detection and avoidance** by the AI character, rather than for picking up, pushing, or otherwise manipulating the furniture.
 
 ### Registering Furniture in Newton (First Use)
 
-Each furniture type must be registered the first time you use it. Registration is automatic, but **Newton must be restarted after the first registration** before that furniture is ready for normal use.
+Each new furniture object must be registered before use. Registration is automatic, but **Newton must be restarted after registration** before the collider is available for normal use.
 
 1. Start **Newton** and **Virt-A-Mate**.
 2. Make sure the AI character is running and its motion is synchronized with the character in VaM.
@@ -61,11 +64,13 @@ Each furniture type must be registered the first time you use it. Registration i
 4. Newton automatically processes the received collider shapes, simplifies them, and saves the furniture collider assets.
 5. **Restart Newton** to complete the furniture setup.
 
-Registered furniture can be reused in later sessions without repeating this process. The saved assets are located in:
+Registered furniture can be reused in later sessions without repeating this process, provided its scale has not changed. Saved collider assets are located in:
 
 ```text
 data/assets/objects/vam_env_boxes/
 ```
+
+**Note:** If you change the scale of an already-registered furniture Atom, its stored collider geometry must be re-registered. Moving or rotating the Atom alone does not require re-registration.
 
 ---
 
@@ -76,8 +81,10 @@ Use a **double trigger press (×2)** on the corresponding VR controller. Perform
 | Controller | Action | Result |
 | --- | --- | --- |
 | **Left — double trigger** | Point at empty space and double press | Toggle AI target following **ON / OFF** (**Follow / Stay**). |
-| **Right — double trigger** | Point in the desired direction and double press | Switch the AI's facing direction to the direction indicated by the controller. |
-| **Right — double trigger** | Point at the ground and double press | Switch back to having the AI **look toward you**. |
+| **Right — double trigger** | Point in the desired direction and double press | Set the AI's facing direction to the direction indicated by the controller. |
+| **Right — double trigger** | Point at the ground and double press | Return to having the AI **look toward you**. |
+
+You can also **push and grab the AI character** with your VR controllers.
 
 ---
 
@@ -87,7 +94,6 @@ Use a **double trigger press (×2)** on the corresponding VR controller. Perform
 
 1. **Git:** Install from [git-scm.com](https://git-scm.com).
 2. **Miniconda / Anaconda:** Install from [anaconda.com](https://anaconda.com).
-
 
 ### Installation & Execution
 
@@ -106,9 +112,7 @@ Run the following commands in your **Anaconda Prompt**.
 
    In **Step 3**, follow the download link for the assets and motion data (`.zip` archive).
 
-   Extract the archive and place its contents inside the `data/` directory of this cloned repository.
-
-   Preserve the original directory structure so that the assets and motion files are available under `data/` (e.g., `data/motions/`).
+   Extract the archive and place its contents inside the `data/` directory of this cloned repository. Preserve the original directory structure so the assets and motion files are available under `data/` (e.g., `data/motions/`).
 
 3. **Create and activate the Python environment:**
 
@@ -129,13 +133,15 @@ Run the following commands in your **Anaconda Prompt**.
    pip install -r requirements.txt
    ```
 
-   > **Troubleshooting (`J_ki` Error):** Depending on your GPU architecture (e.g., RTX 3090), a `J_ki`-related Warp compilation error may occur. If you encounter this error, please refer to the `patches/` folder and apply the fix to `solver.py` in your Conda environment before proceeding.
+   > **Troubleshooting (`J_ki` Error):** Depending on your GPU architecture (e.g., RTX 3090), a `J_ki`-related Warp compilation error may occur. If you encounter this error, refer to the `patches/` folder and apply the fix to `solver.py` in your Conda environment before proceeding.
 
 6. **Run AI Inference:**
 
    ```bash
    python mimickit/run.py --mode test --num_envs 1 --engine_config data/engines/newton_engine.yaml --env_config data/envs/amp_g1_vam_env.yaml --agent_config data/agents/amp_g1_vam_agent.yaml --visualize true --model_file checkpoint/model.pt
    ```
+
+   The pre-trained AI model is included at `checkpoint/model.pt`; you do not need to train a model before trying the project.
 
 7. **Virt-A-Mate Setup:**
 
@@ -145,8 +151,15 @@ Run the following commands in your **Anaconda Prompt**.
    - `VRhand_Mimickit2.cs` — **Scene plugin** (sends VR controller and HMD tracking data via UDP 9999).
    - `Atom_sync_mimickit_public.cs` — **Scene plugin** (sends furniture Atom positions, rotations, and collider shapes via UDP 9001/9002).
 
-   Configure the IP addresses and UDP ports in the plugin UI according to your single-PC or dual-PC setup.
+   > ⚠️ **Important — Scene Alignment:** Before running the simulation, verify the following in VaM:
+   > - The **Person Atom's Main Controller** (at the character's feet) has **world position `(0, 0, 0)`** and **rotation `(0, 0, 0)`**.
+   > - The **ground Atom's Y position (height) is `0`**.
+   >
+   > Incorrect position or rotation alignment can cause furniture locations in Newton to differ from their positions relative to the character in VaM.
 
+   Configure the IP addresses and UDP ports through the plugin UIs according to your single-PC or dual-PC setup.
+
+8. **Done!** Once Newton and VaM are running and synchronized, the AI character will start moving. You can interact with it using VR controllers or test Follow Mode in Desktop Mode.
 
 ---
 
@@ -158,25 +171,27 @@ The following files are additions or modifications specific to this fork:
 MimicKit_VaM/
 ├── mimickit/
 │   ├── envs/
-│       ├── env_builder.py           # [Modified] Register the custom VaM environment
-│       ├── amp_env_vam.py           # [Added] AMP environment, observations and resets
-│       ├── vam_environment_boxes.py # [Added] Furniture transforms (9001) and shapes (9002)
-│       ├── collider_simplifier.py   # [Added] Simplify and save received collider shapes
-│       ├── vam_vr_tracking.py       # [Added] VR hand/HMD input (9999) and transforms
-│       ├── vam_vr_body.py           # [Added] VR body/arm IK and dynamic capsules
-│       ├── vam_vr_physics.py        # [Added] PD interactions and trigger-based dragging
-│       ├── vam_vr_assets.py         # [Added] Generated XML assets for VR interaction
-│       ├── vam_udp_sender.py        # [Added] Character motion output (9998)
-│       └── task_location_env_vam.py # [Added] VaM-specific target location task
+│   │   ├── env_builder.py           # [Modified] Register the custom VaM environment
+│   │   ├── amp_env_vam.py           # [Added] AMP environment, observations and resets
+│   │   ├── vam_environment_boxes.py # [Added] Furniture transforms (9001) and shapes (9002)
+│   │   ├── collider_simplifier.py   # [Added] Simplify and save received collider shapes
+│   │   ├── vam_vr_tracking.py       # [Added] VR hand/HMD input (9999) and transforms
+│   │   ├── vam_vr_body.py           # [Added] VR body/arm IK and dynamic capsules
+│   │   ├── vam_vr_physics.py        # [Added] PD interactions and trigger-based dragging
+│   │   ├── vam_vr_assets.py         # [Added] Generated XML assets for VR interaction
+│   │   ├── vam_udp_sender.py        # [Added] Character motion output (9998)
+│   │   └── task_location_env_vam.py # [Added] VaM-specific target location task
 │   └── learning/
 │       ├── agent_builder.py         # [Modified] Register inference agent
 │       ├── base_agent.py            # [Modified] Support inference agent integration
 │       ├── inference_agent.py       # [Added] Inference-only agent
 │       └── inference_model.py       # [Added] Inference-only model
-├── data/                       # Config files, reference motions and assets
-│   └── assets/objects/vam_env_boxes/ # Registered furniture collider assets
+├── data/                             # Configuration, reference motions and assets
+│   └── assets/
+│       └── objects/
+│           └── vam_env_boxes/        # Registered furniture collider assets
 ├── checkpoint/
-│   └── model.pt                 # Pre-trained AI model
+│   └── model.pt                      # Pre-trained AI model
 └── ...
 ```
 
