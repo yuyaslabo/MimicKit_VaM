@@ -27,9 +27,9 @@ public class VRHandUDPSender : MVRScript
 
     // Desktop double trigger: repeat every state for multiple 15 Hz UDP packets.
     // Sequence: OFF -> ON -> OFF -> ON -> OFF.
-    // Four packets/state ~= 267 ms; rising-edge separation ~= 533 ms (< receiver 850 ms).
+    // Three packets/state ~= 200 ms; rising-edge separation ~= 400 ms (< receiver 650 ms).
     // This prevents the receiver's latest-packet-only polling from skipping short edges.
-    private const int DOUBLE_TRIGGER_PACKETS_PER_STATE = 4;
+    private const int DOUBLE_TRIGGER_PACKETS_PER_STATE = 3;
     private int leftDoubleTriggerPhase = 0;
     private int rightDoubleTriggerPhase = 0;
     private int leftDoubleTriggerPacketsRemaining = 0;
