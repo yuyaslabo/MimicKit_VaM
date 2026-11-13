@@ -6,7 +6,7 @@ Run physical AI trained with MimicKit inside Virt-A-Mate (VaM). Interact with th
 
 > ⚠️ **Disclaimer:** This is an unofficial community project. It is not affiliated with, associated with, or endorsed by MimicKit or MeshedVR.
 
-📺 **DEMO:** [https://youtube.com](https://youtube.com) | [https://youtube.com](https://youtube.com)
+📺 **DEMO:** [Watch on YouTube](https://www.youtube.com/watch?v=8Xqi1D7QRnU)
 
 ---
 
