@@ -40,8 +40,8 @@ Virt-A-Mate (VaM)                          Newton / MimicKit
 - **VaM side:** Configure VR hand tracking output, furniture synchronization, and character bone reception through the corresponding plugin UIs.
 - **Newton/MimicKit side:** Adjust the relevant UDP settings in `data/envs/amp_g1_vam_env.yaml` (including `vam_udp_ip`, `vam_udp_port`, and `vrhand_udp_port`).
 - **VaM plugins:**
-  - `MimickitReceiver.cs` — **Person plugin** for receiving AI character motion.
-  - `VRhand_Mimickit2.cs` — **Scene plugin** for VR controller/HMD data and controls.
+  - `Receiver_mimickit_public.cs` — **Person plugin** for receiving AI character motion.
+  - `VRhand_mimickit_public.cs` — **Scene plugin** for VR controller/HMD data and controls.
   - `Atom_sync_mimickit_public.cs` — **Scene plugin** for furniture Atom transform and collider shape synchronization.
 
 ### Furniture Synchronization
@@ -145,8 +145,8 @@ Run the following commands in your **Anaconda Prompt**.
 
    Load the following plugins in Virt-A-Mate:
 
-   - `MimickitReceiver.cs` — **Person plugin** (receives AI bone motion via UDP 9998).
-   - `VRhand_Mimickit2.cs` — **Scene plugin** (sends VR controller and HMD tracking data via UDP 9999).
+   - `Receiver_mimickit_public.cs` — **Person plugin** (receives AI bone motion via UDP 9998).
+   - `VRhand_mimickit_public.cs` — **Scene plugin** (sends VR controller and HMD tracking data via UDP 9999).
    - `Atom_sync_mimickit_public.cs` — **Scene plugin** (sends furniture Atom positions, rotations, and collider shapes via UDP 9001/9002).
 
    > ⚠️ **Important — Scene Alignment:** Before running the simulation, verify the following in VaM:
