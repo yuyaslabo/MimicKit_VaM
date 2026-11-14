@@ -51,6 +51,7 @@ Virt-A-Mate (VaM)                          Newton / MimicKit
 - **UDP 9001:** Furniture Atom position and rotation updates during operation.
 - **UDP 9002:** Furniture Atom collider shape data, sent when the plugin starts and when new furniture Atoms are added to the scene.
 - **Position and rotation changes are synchronized**, but **scale changes are not synchronized**. If you change a furniture Atom's scale, you must **re-register its collider shape in Newton** and restart Newton to use the updated shape.
+- **Collision Shape Limitation:** Curved surfaces, such as round tables, are not currently supported by the furniture collider synchronization system.
 
 ### Registering Furniture in Newton (First Use)
 
