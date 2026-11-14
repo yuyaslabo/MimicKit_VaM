@@ -177,7 +177,7 @@ MimicKit_VaM/
 │   │   ├── vam_environment_boxes.py # [Added] Furniture transforms (9001) and shapes (9002)
 │   │   ├── collider_simplifier.py   # [Added] Simplify and save received collider shapes
 │   │   ├── vam_vr_tracking.py       # [Added] VR hand/HMD input (9999) and transforms
-│   │   ├── vam_vr_body.py           # [Added] VR body/arm IK and dynamic capsules
+│   │   ├── vam_vr_body.py           # [Added] VR body/arm IK (arm capsules currently disabled due to Newton performance impact)
 │   │   ├── vam_vr_physics.py        # [Added] PD interactions and trigger-based dragging
 │   │   ├── vam_vr_assets.py         # [Added] Generated XML assets for VR interaction
 │   │   ├── vam_udp_sender.py        # [Added] Character motion output (9998)
